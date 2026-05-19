@@ -86,7 +86,7 @@ main()
 
 ## Input Data Format
 
-Each session directory must follow this structure (compatible with the output of [pose_graph_optimization](../pose_graph_optimization)):
+Each session directory must follow this structure (compatible with the output of [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)):
 
 ```
 <session_dir>/
@@ -328,7 +328,7 @@ This package integrates or adapts the following open-source works:
 
 | Library / Code | Authors | License | Link |
 |---|---|---|---|
-| **SOLiD descriptor** | Hogyun Kim, Jiwon Choi, Taehu Sim, Giseop Kim, Younggun Cho et al. | MIT | [sparolab/solid](https://github.com/sparolab/solid) |
+| **SOLiD descriptor** | Hogyun Kim et al. | MIT | [sparolab/solid](https://github.com/sparolab/solid) |
 | **NanoGICP** | Ken Nakamura | MIT | [engcang/nano_gicp](https://github.com/engcang/nano_gicp) |
 | **nanoflann** | Jose Luis Blanco | BSD-2 | [jlblancoc/nanoflann](https://github.com/jlblancoc/nanoflann) |
 | **GTSAM** | Frank Dellaert et al. | BSD-2 | [borglab/gtsam](https://github.com/borglab/gtsam) |
