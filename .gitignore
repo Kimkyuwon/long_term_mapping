@@ -1,0 +1,17 @@
+# 대용량 포인트클라우드 맵 데이터 (GitHub 100MB 제한 초과)
+Campus1/
+Campus2/
+
+# 빌드 산출물
+build/
+install/
+log/
+
+# CMake 캐시
+CMakeCache.txt
+CMakeFiles/
+
+# 편집기
+.vscode/
+*.swp
+*.swo

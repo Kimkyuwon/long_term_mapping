@@ -1,0 +1,20 @@
+/**:
+  ros__parameters:
+    directory1: /home/kkw/localization_ws/src/long_term_mapping/Campus1
+    directory2: /home/kkw/localization_ws/src/long_term_mapping/Campus2
+    output_directory: "\u3147\u3141\u3147\u3134\u3141\u3147"
+    posegraph:
+      dop_thres: 1.1
+      fov_d: -15.0
+      fov_u: 15.0
+      max_distance: 100
+      min_distance: 1
+      num_angle: 120
+      num_candidates_from_tree: 20
+      num_exclude_recent: 0
+      num_height: 16
+      num_range: 100
+      r_solid_thres: 0.95
+      voxel_size: 0.4
+    preprocess:
+      blind: 1.0
