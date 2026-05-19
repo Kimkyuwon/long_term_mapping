@@ -138,7 +138,8 @@ Each session directory must follow this structure (compatible with the output of
 | [nano_gicp](https://github.com/engcang/nano_gicp) | Fast GICP implementation |
 | [SOLiD](https://github.com/sparolab/solid) | Place recognition descriptor |
 | [patchworkpp](https://github.com/url-kaist/patchwork-plusplus) | Ground segmentation (optional, commented out) |
-| [fast_lio](https://github.com/Kimkyuwon/FAST_LIO_Localization_and_Mapping) | Upstream odometry / keyframe producer |
+| [fast_lio2_mapping_and_localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) | LiDAR-Inertial odometry / keyframe producer |
+| [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) | Single-session pose-graph optimisation & keyframe export |
 
 ### GTSAM Installation
 ```bash
@@ -153,11 +154,11 @@ sudo apt install libgtsam-dev libgtsam-unstable-dev
 
 ```bash
 # 1. Clone into workspace
-cd ~/localization_ws/src
+cd ~/your_workspace/src
 git clone https://github.com/Kimkyuwon/long_term_mapping.git
 
 # 2. Install ROS2 dependencies
-cd ~/localization_ws
+cd ~/your_workspace
 rosdep install --from-paths src --ignore-src -r -y
 
 # 3. Build
@@ -201,16 +202,6 @@ Edit `config/params.yaml` before launching:
       dop_thres: 1.1                       # DOP ratio rejection threshold
 ```
 
-### Parameter Tuning Guide
-
-| Scenario | Recommendation |
-|---|---|
-| Dense urban, many loop candidates | Raise `r_solid_thres` (0.95–0.98) |
-| Sparse environment / few revisits | Lower `r_solid_thres` (0.85–0.92) |
-| 16-channel LiDAR | Set `num_height: 16`, adjust `fov_u/d` |
-| 32/64-channel LiDAR | Set `num_height: 32` or `64` |
-| Large voxel (fast, coarser map) | Raise `voxel_size` (0.5–1.0) |
-
 ---
 
 ## Running
@@ -229,16 +220,6 @@ ros2 launch long_term_mapping lt_mapper.launch.py \
 ```bash
 ros2 launch long_term_mapping lt_mapper.launch.py \
     rviz:=false
-```
-
-### Override session directories at launch time
-
-```bash
-ros2 run long_term_mapping LTmapping \
-    --ros-args \
-    -p directory1:=/data/session_A \
-    -p directory2:=/data/session_B \
-    -p output_directory:=Merged
 ```
 
 ### Expected Console Output
@@ -347,7 +328,7 @@ This package integrates or adapts the following open-source works:
 
 | Library / Code | Authors | License | Link |
 |---|---|---|---|
-| **SOLiD descriptor** | Hyungtae Lim et al. | MIT | [sparolab/solid](https://github.com/sparolab/solid) |
+| **SOLiD descriptor** | Hogyun Kim, Jiwon Choi, Taehu Sim, Giseop Kim, Younggun Cho et al. | MIT | [sparolab/solid](https://github.com/sparolab/solid) |
 | **NanoGICP** | Ken Nakamura | MIT | [engcang/nano_gicp](https://github.com/engcang/nano_gicp) |
 | **nanoflann** | Jose Luis Blanco | BSD-2 | [jlblancoc/nanoflann](https://github.com/jlblancoc/nanoflann) |
 | **GTSAM** | Frank Dellaert et al. | BSD-2 | [borglab/gtsam](https://github.com/borglab/gtsam) |
