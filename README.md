@@ -2,7 +2,7 @@
 
 **Multi-Session LiDAR SLAM for Long-Term Map Maintenance**
 
-> A ROS2 C++ package that merges independently-acquired LiDAR sessions, detects structural changes between sessions, and produces a unified map with positive/negative change maps. The implementation is inspired by the concepts in the [LT-mapper paper](#citation) and re-implemented from scratch for ROS2 Jazzy.
+> A ROS2 C++ package that merges independently-acquired LiDAR sessions, detects structural changes between sessions, and produces a unified map with positive/negative change maps. The implementation is inspired by the concepts in the [LT-mapper paper](https://ieeexplore.ieee.org/abstract/document/9811916/) and re-implemented from scratch for ROS2 Jazzy.
 
 ---
 
@@ -304,7 +304,7 @@ must fall below `dop_thres`; matches with a high DOP ratio indicate insufficient
 
 ### 3. Anchor-node Pose-graph Optimization
 
-Following the anchor-node formulation [Kim et al.](#citation), each session maintains its own coordinate frame. The central session anchor `Δ_C` is fixed with near-zero covariance; the query anchor `Δ_Q` has large initial covariance. Inter-session loop factors are expressed relative to both anchors, allowing iSAM2 to jointly estimate the sessions' internal drifts and their relative offset.
+Following the anchor-node formulation [Kim et al.](https://ieeexplore.ieee.org/abstract/document/9811916/), each session maintains its own coordinate frame. The central session anchor `Δ_C` is fixed with near-zero covariance; the query anchor `Δ_Q` has large initial covariance. Inter-session loop factors are expressed relative to both anchors, allowing iSAM2 to jointly estimate the sessions' internal drifts and their relative offset.
 
 Robust Cauchy M-estimators are applied to all loop factors to handle false positives.
 
@@ -333,22 +333,6 @@ This package integrates or adapts the following open-source works:
 | **nanoflann** | Jose Luis Blanco | BSD-2 | [jlblancoc/nanoflann](https://github.com/jlblancoc/nanoflann) |
 | **GTSAM** | Frank Dellaert et al. | BSD-2 | [borglab/gtsam](https://github.com/borglab/gtsam) |
 | **CurvedVoxelClustering** | btran | MIT | based on [Curved-Voxel-Clustering](https://github.com/wangx1996/Curved-Voxel-Clustering) |
-
----
-
-## Citation
-
-This package is a ROS2 re-implementation inspired by the multi-session SLAM and change detection concepts described in:
-
-```bibtex
-@inproceedings{kim2021ltmapper,
-  title     = {LT-mapper: A Modular Framework for LiDAR-based Lifelong Mapping},
-  author    = {Kim, Giseop and Kim, Ayoung},
-  year      = {2022}
-}
-```
-
-> **Note:** This codebase was independently written for the ROS2 ecosystem and is **not** a fork or derivative of the original [LT-mapper repository](https://github.com/gisbi-kim/lt-mapper). The algorithm design references the above paper; all code is an original implementation by the author.
 
 ---
 
