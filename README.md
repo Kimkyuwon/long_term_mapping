@@ -35,7 +35,7 @@
    - **ND (Negative Difference)**: points that disappeared between sessions
    - **PD (Positive Difference)**: newly appearing structures
 5. **Curved Voxel Clustering** for dynamic object segmentation from the change maps
-6. **Unified map export** — merged point cloud, per-session ground/non-ground maps, and updated pose files
+6. **Unified map export** — merged point cloud, per-session PD/ND maps, and updated pose files
 
 ```
 Session 1 (directory1/)          Session 2 (directory2/)
