@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
-    directory1: /home/kkw/localization_ws/src/long_term_mapping/Campus1
-    directory2: /home/kkw/localization_ws/src/long_term_mapping/Campus2
-    output_directory: "\u3147\u3141\u3147\u3134\u3141\u3147"
+    directory1: /your_work_space/src/long_term_mapping/Campus1
+    directory2: /your_work_space/src/long_term_mapping/Campus2
+    output_directory: "mergeMap"
     posegraph:
       dop_thres: 1.1
       fov_d: -15.0
