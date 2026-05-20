@@ -344,8 +344,7 @@ This package is a ROS2 re-implementation inspired by the multi-session SLAM and 
 @inproceedings{kim2021ltmapper,
   title     = {LT-mapper: A Modular Framework for LiDAR-based Lifelong Mapping},
   author    = {Kim, Giseop and Kim, Ayoung},
-  booktitle = {arXiv preprint arXiv:2107.07712},
-  year      = {2021}
+  year      = {2022}
 }
 ```
 
