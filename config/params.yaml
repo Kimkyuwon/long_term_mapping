@@ -1,7 +1,7 @@
 /**:
   ros__parameters:
-    directory1: /your_work_space/src/long_term_mapping/Campus1
-    directory2: /your_work_space/src/long_term_mapping/Campus2
+    directory1: "/your_work_space/src/long_term_mapping/Campus1"
+    directory2: "/your_work_space/src/long_term_mapping/Campus2"
     output_directory: "mergeMap"
     posegraph:
       dop_thres: 1.1
