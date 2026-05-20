@@ -304,7 +304,7 @@ must fall below `dop_thres`; matches with a high DOP ratio indicate insufficient
 
 ### 3. Anchor-node Pose-graph Optimization
 
-Following the anchor-node formulation [[Kim et al., 2010]](#citation), each session maintains its own coordinate frame. The central session anchor `Δ_C` is fixed with near-zero covariance; the query anchor `Δ_Q` has large initial covariance. Inter-session loop factors are expressed relative to both anchors, allowing iSAM2 to jointly estimate the sessions' internal drifts and their relative offset.
+Following the anchor-node formulation [Kim et al.](#citation), each session maintains its own coordinate frame. The central session anchor `Δ_C` is fixed with near-zero covariance; the query anchor `Δ_Q` has large initial covariance. Inter-session loop factors are expressed relative to both anchors, allowing iSAM2 to jointly estimate the sessions' internal drifts and their relative offset.
 
 Robust Cauchy M-estimators are applied to all loop factors to handle false positives.
 
