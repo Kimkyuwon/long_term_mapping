@@ -40,6 +40,7 @@
 ```
 Session 1 (directory1/)          Session 2 (directory2/)
   ├── Scans/  (*.pcd)               ├── Scans/  (*.pcd)
+  ├── StaticMap.pcd                 ├── StaticMap.pcd
   ├── optimized_poses.txt           ├── optimized_poses.txt
   └── edges.txt                     └── edges.txt
               │                              │
@@ -64,7 +65,7 @@ main()
  ├── initNoises()           — initialise GTSAM noise models
  ├── getEdges()             — build intra-session odometry factors
  ├── placeRecognition()     — SOLiD-based inter-session loop detection
- ├── getLoopEdges()         — NanoGICP scan matching + DOP check
+ ├── getLoopEdges()         — KISS-Matcher global registration (A2_anchor) + NanoGICP loop edges
  ├── getPoses()             — add anchor-node prior/loop factors
  ├── runISAM2opt()          — iSAM2 pose-graph optimisation + updatePoses()
  ├── generateOptimizedMap() — assemble merged PCD maps
@@ -76,6 +77,7 @@ main()
 
 | Component | Role |
 |---|---|
+| **KISS-Matcher** | Global point cloud registration to compute initial inter-session transform (A2_anchor) |
 | **SOLiDModule** | Rotation-invariant global descriptor for inter-session loop candidates |
 | **NanoGICP** | Fast generalised ICP for 6-DOF relative pose estimation |
 | **GTSAM iSAM2** | Incremental Bayesian pose-graph optimiser |
@@ -96,6 +98,7 @@ Each session directory must follow this structure (compatible with the output of
 │   ├── 0_nonground.pcd    ← non-ground points
 │   ├── 1.pcd
 │   └── ...
+├── StaticMap.pcd          ← merged static point cloud map (required for KISS-Matcher)
 ├── optimized_poses.txt    ← one line per keyframe:
 │                              timestamp tx ty tz qx qy qz qw
 └── edges.txt              ← one line per edge:
@@ -131,6 +134,15 @@ Each session directory must follow this structure (compatible with the output of
 | [Eigen3](https://eigen.tuxfamily.org/) ≥ 3.4 | Linear algebra | `sudo apt install libeigen3-dev` |
 | [GTSAM](https://gtsam.org/) ≥ 4.1 | Pose-graph optimisation | see below |
 | OpenMP | Parallelisation | `sudo apt install libomp-dev` |
+| [flann](https://github.com/flann-lib/flann) | Approximate nearest neighbours (KISS-Matcher) | `sudo apt install libflann-dev` |
+| [lz4](https://github.com/lz4/lz4) | Compression (KISS-Matcher) | `sudo apt install liblz4-dev` |
+| [oneTBB](https://github.com/oneapi-src/oneTBB) | Parallelism (KISS-Matcher) | `sudo apt install libtbb-dev` |
+
+### Bundled Third-party Libraries (no separate install)
+| Library | Purpose | Notes |
+|---|---|---|
+| [KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher) | Global point cloud registration | Source bundled in `include/kiss_matcher/` |
+| [ROBIN](https://github.com/MIT-SPARK/ROBIN) | Rotation-invariant outlier rejection (KISS-Matcher dep.) | Auto-downloaded via CMake FetchContent on first build |
 
 ### Third-party ROS2 Packages (source build)
 | Package | Notes |
@@ -152,21 +164,44 @@ sudo apt install libgtsam-dev libgtsam-unstable-dev
 
 ## Build
 
+### 1. Install system dependencies
+
 ```bash
-# 1. Clone into workspace
+# Core build tools & SLAM libraries
+sudo apt install libeigen3-dev libpcl-dev libomp-dev
+
+# KISS-Matcher dependencies (bundled source, needs these system libs)
+sudo apt install libflann-dev liblz4-dev libtbb-dev
+
+# GTSAM
+sudo add-apt-repository ppa:borglab/gtsam-release-4.1
+sudo apt update
+sudo apt install libgtsam-dev libgtsam-unstable-dev
+```
+
+### 2. Clone and build
+
+```bash
+# Clone into workspace
 cd ~/your_workspace/src
 git clone https://github.com/Kimkyuwon/long_term_mapping.git
 
-# 2. Install ROS2 dependencies
+# Install ROS2 package dependencies
 cd ~/your_workspace
 rosdep install --from-paths src --ignore-src -r -y
 
-# 3. Build
+# Build
+# Note: On the first build, CMake will automatically download ROBIN
+#       (KISS-Matcher dependency) from the internet. Internet access required once.
 colcon build --packages-select long_term_mapping --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-# 4. Source workspace
+# Source workspace
 source install/setup.bash
 ```
+
+> **Note**: `include/kiss_matcher/` is bundled in this repository.  
+> No separate KISS-Matcher installation is required.  
+> ROBIN is fetched automatically by CMake on the first build and cached for subsequent builds.
 
 ---
 
@@ -180,26 +215,27 @@ Edit `config/params.yaml` before launching:
     # ── Input session directories ──────────────────────────────────────────
     directory1: /path/to/session1          # Central (reference) session
     directory2: /path/to/session2          # Query (new) session
-    output_directory: MergedOutput         # Relative to package root
+    output_directory: output               # Relative to package root
 
     # ── Preprocessing ──────────────────────────────────────────────────────
-    preprocess:
-      blind: 1.0                           # Ignore returns within this radius [m]
+    blind: 1.0                             # Ignore returns within this radius [m]
+
+    # ── KISS-Matcher (inter-session global registration) ───────────────────
+    anchor_resolution: 2.0                 # Voxel resolution for KISS-Matcher [m]
 
     # ── SOLiD place recognition & pose-graph ───────────────────────────────
-    posegraph:
-      r_solid_thres: 0.95                  # SOLiD similarity threshold (↑ = stricter)
-      fov_u:  15.0                         # LiDAR vertical FoV upper bound [deg]
-      fov_d: -15.0                         # LiDAR vertical FoV lower bound [deg]
-      num_angle: 120                       # SOLiD azimuth bins
-      num_range: 100                       # SOLiD range bins
-      num_height: 16                       # SOLiD height bins
-      min_distance: 1                      # Minimum descriptor search range [m]
-      max_distance: 100                    # Maximum descriptor search range [m]
-      voxel_size: 0.4                      # Voxel leaf size for maps [m]
-      num_exclude_recent: 0                # Exclude N most-recent frames from search
-      num_candidates_from_tree: 20         # Top-K candidates per query
-      dop_thres: 1.1                       # DOP ratio rejection threshold
+    r_solid_thres: 0.95                    # SOLiD similarity threshold (↑ = stricter)
+    fov_u:  15.0                           # LiDAR vertical FoV upper bound [deg]
+    fov_d: -15.0                           # LiDAR vertical FoV lower bound [deg]
+    num_angle: 120                         # SOLiD azimuth bins
+    num_range: 100                         # SOLiD range bins
+    num_height: 16                         # SOLiD height bins
+    min_distance: 1                        # Minimum descriptor search range [m]
+    max_distance: 100                      # Maximum descriptor search range [m]
+    voxel_size: 0.4                        # Voxel leaf size for maps [m]
+    num_exclude_recent: 0                  # Exclude N most-recent frames from search
+    num_candidates_from_tree: 20           # Top-K candidates per query
+    dop_thres: 1.1                         # DOP ratio rejection threshold
 ```
 
 ---

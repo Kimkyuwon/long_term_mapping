@@ -61,6 +61,24 @@ find_package(Boost REQUIRED COMPONENTS system timer thread serialization chrono)
 find_package(Eigen3 REQUIRED)
 find_package(PCL 1.8 REQUIRED)
 
+# ---------------- KISS-Matcher ----------------
+# colcon 빌드 환경에서 /usr/local 탐색 경로 추가
+list(APPEND CMAKE_PREFIX_PATH /usr/local)
+find_package(robin QUIET)        # kiss_matcherConfig.cmake에 robin 의존성이 누락되어 있어 먼저 로드
+find_package(kiss_matcher QUIET)
+
+# TARGET 존재 여부로 판단 (find_package 결과 변수보다 신뢰성 높음)
+if(NOT TARGET kiss_matcher::kiss_matcher_core)
+  message(STATUS "[long_term_mapping] kiss_matcher target not found, building from bundled source")
+  set(USE_SYSTEM_TBB    ON  CACHE BOOL "Use system TBB"    FORCE)
+  set(USE_SYSTEM_EIGEN3 ON  CACHE BOOL "Use system Eigen3" FORCE)
+  set(USE_SYSTEM_ROBIN  OFF CACHE BOOL "Use system ROBIN"  FORCE)
+  add_subdirectory(include/kiss_matcher)
+else()
+  message(STATUS "[long_term_mapping] Found kiss_matcher::kiss_matcher_core target")
+endif()
+# ----------------------------------------------
+
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 
 include_directories(
@@ -96,7 +114,16 @@ add_executable(LTmapping src/long_term_mapping.cpp
                   include/solid/solid.cpp
                   include/CurvedVoxelClustering.cpp
                   ${CMAKE_CURRENT_SOURCE_DIR}/../patchwork-plusplus-master/cpp/patchworkpp/src/patchworkpp.cpp)
-target_link_libraries(LTmapping ${PCL_LIBRARIES} ${PYTHON_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} gtsam)
+
+target_link_libraries(LTmapping
+  ${PCL_LIBRARIES}
+  ${PYTHON_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${OpenMP_CXX_FLAGS}
+  gtsam
+  kiss_matcher::kiss_matcher_core
+)
+
 target_include_directories(LTmapping PRIVATE ${PYTHON_INCLUDE_DIRS})
 
 ament_target_dependencies(LTmapping

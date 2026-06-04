@@ -55,6 +55,9 @@
 #include <nano_gicp/point_type_nano_gicp.hpp>
 #include <nano_gicp/nano_gicp.hpp>
 #include "CurvedVoxelClustering.hpp"
+#include <kiss_matcher/FasterPFH.hpp>
+#include <kiss_matcher/GncSolver.hpp>
+#include <kiss_matcher/KISSMatcher.hpp>
 // #include "patchwork_plusplus/patchworkpp.hpp"
 
 using namespace std;
@@ -72,7 +75,7 @@ struct Pose6 {
 
 // 두 디렉토리 명을 파라미터 또는 터미널에서 입력받기
 string save_directory, DebugDirectory, ScanDirectory, directory1, directory2, output_directory;
-string dir1_scans_path, dir1_poses_path, dir1_edges_path, dir2_scans_path, dir2_poses_path, dir2_edges_path;
+string dir1_scans_path, dir1_poses_path, dir1_edges_path, dir1_map_path, dir2_scans_path, dir2_poses_path, dir2_edges_path, dir2_map_path;
 
 fstream optimized_stream, edge_stream;
 
@@ -116,8 +119,8 @@ noiseModel::Diagonal::shared_ptr largeNoise;
 noiseModel::Diagonal::shared_ptr odomNoise;
 noiseModel::Base::shared_ptr robustLoopNoise;
 int recentIdxUpdated = 0;
-int anchor_idx;
 gtsam::Pose3 A2_anchor;
+double anchor_resolution;
 vector<pair<int, int>> loop_pairs;
 
 visualization_msgs::msg::Marker loopLine;
@@ -135,36 +138,38 @@ void setParams (std::shared_ptr<rclcpp::Node> nh)
 
     // PatchworkppGroundSeg.reset(new PatchWorkpp<pcl::PointXYZI>());
 
-    nh->declare_parameter("preprocess.blind", 0.01);
-    nh->declare_parameter("posegraph.r_solid_thres", 0.99);
-    nh->declare_parameter("posegraph.fov_u", 2.0);
-    nh->declare_parameter("posegraph.fov_d", -24.8);
-    nh->declare_parameter("posegraph.num_angle", 60);
-    nh->declare_parameter("posegraph.num_range", 40);
-    nh->declare_parameter("posegraph.num_height", 32);
-    nh->declare_parameter("posegraph.min_distance", 3);
-    nh->declare_parameter("posegraph.max_distance", 80);
-    nh->declare_parameter("posegraph.voxel_size", 0.4);
-    nh->declare_parameter("posegraph.num_exclude_recent", 30);
-    nh->declare_parameter("posegraph.num_candidates_from_tree", 3);
-    nh->declare_parameter("posegraph.dop_thres", 0.5);
+    nh->declare_parameter("blind", 0.01);
+    nh->declare_parameter("r_solid_thres", 0.99);
+    nh->declare_parameter("fov_u", 2.0);
+    nh->declare_parameter("fov_d", -24.8);
+    nh->declare_parameter("num_angle", 60);
+    nh->declare_parameter("num_range", 40);
+    nh->declare_parameter("num_height", 32);
+    nh->declare_parameter("min_distance", 3);
+    nh->declare_parameter("max_distance", 80);
+    nh->declare_parameter("anchor_resolution", 1.0);
+    nh->declare_parameter("voxel_size", 0.4);
+    nh->declare_parameter("num_exclude_recent", 30);
+    nh->declare_parameter("num_candidates_from_tree", 3);
+    nh->declare_parameter("dop_thres", 0.5);
     nh->declare_parameter("directory1", std::string(""));
     nh->declare_parameter("directory2", std::string(""));
     nh->declare_parameter("output_directory", std::string(""));
     
-    nh->get_parameter_or<double>("preprocess.blind", blind, 0.01);
-    nh->get_parameter_or<double>("posegraph.r_solid_thres", R_SOLiD_THRES, 0.99);
-    nh->get_parameter_or<double>("posegraph.fov_u", FOV_u, 2.0);
-    nh->get_parameter_or<double>("posegraph.fov_d", FOV_d, -24.8);
-    nh->get_parameter_or<int>("posegraph.num_angle", NUM_ANGLE, 60);
-    nh->get_parameter_or<int>("posegraph.num_range", NUM_RANGE, 40);
-    nh->get_parameter_or<int>("posegraph.num_height", NUM_HEIGHT, 32);
-    nh->get_parameter_or<int>("posegraph.min_distance", MIN_DISTANCE, 3);
-    nh->get_parameter_or<int>("posegraph.max_distance", MAX_DISTANCE, 80);
-    nh->get_parameter_or<double>("posegraph.voxel_size", VOXEL_SIZE, 0.4);
-    nh->get_parameter_or<int>("posegraph.num_exclude_recent", NUM_EXCLUDE_RECENT, 30);
-    nh->get_parameter_or<int>("posegraph.num_candidates_from_tree", NUM_CANDIDATES_FROM_TREE, 3);
-    nh->get_parameter_or<double>("posegraph.dop_thres", dop_thres, 0.5);
+    nh->get_parameter_or<double>("blind", blind, 0.01);
+    nh->get_parameter_or<double>("r_solid_thres", R_SOLiD_THRES, 0.99);
+    nh->get_parameter_or<double>("fov_u", FOV_u, 2.0);
+    nh->get_parameter_or<double>("fov_d", FOV_d, -24.8);
+    nh->get_parameter_or<int>("num_angle", NUM_ANGLE, 60);
+    nh->get_parameter_or<int>("num_range", NUM_RANGE, 40);
+    nh->get_parameter_or<int>("num_height", NUM_HEIGHT, 32);
+    nh->get_parameter_or<int>("min_distance", MIN_DISTANCE, 3);
+    nh->get_parameter_or<int>("max_distance", MAX_DISTANCE, 80);
+    nh->get_parameter_or<double>("anchor_resolution", anchor_resolution, 1.0);
+    nh->get_parameter_or<double>("voxel_size", VOXEL_SIZE, 0.4);
+    nh->get_parameter_or<int>("num_exclude_recent", NUM_EXCLUDE_RECENT, 30);
+    nh->get_parameter_or<int>("num_candidates_from_tree", NUM_CANDIDATES_FROM_TREE, 3);
+    nh->get_parameter_or<double>("dop_thres", dop_thres, 0.5);
 
     // 먼저 ROS2 파라미터에서 값 확인
     nh->get_parameter_or<std::string>("directory1", directory1, std::string(""));
@@ -220,6 +225,16 @@ void initNoises( void )
                     gtsam::noiseModel::mEstimator::Cauchy::Create(1.0), // optional: replacing Cauchy by DCS or GemanMcClure is okay but Cauchy is empirically good.
                     gtsam::noiseModel::Diagonal::Variances(robustNoiseVector6) );
 } // initNoises
+
+std::vector<Eigen::Vector3f> convertCloudToVec(const pcl::PointCloud<pcl::PointXYZI>& cloud) {
+    std::vector<Eigen::Vector3f> vec;
+    vec.reserve(cloud.size());
+    for (const auto& pt : cloud.points) {
+      if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) continue;
+      vec.emplace_back(pt.x, pt.y, pt.z);
+    }
+    return vec;
+}
 
 // Quaternion을 Euler angles로 변환하는 함수
 Pose6 poseToPose6(double x, double y, double z, double qx, double qy, double qz, double qw)
@@ -658,11 +673,13 @@ void getDirectory()
     dir1_scans_path = directory1 + "/Scans/";
     dir1_poses_path = directory1 + "/optimized_poses.txt";
     dir1_edges_path = directory1 + "/edges.txt";
+    dir1_map_path   = directory1 + "/StaticMap.pcd";
     
     // 두 번째 디렉토리 경로들
     dir2_scans_path = directory2 + "/Scans/";
     dir2_poses_path = directory2 + "/optimized_poses.txt";
     dir2_edges_path = directory2 + "/edges.txt";
+    dir2_map_path   = directory2 + "/StaticMap.pcd";
     
     // 경로 출력으로 확인
     std::cout << "=== Directory Paths ===" << std::endl;
@@ -855,8 +872,28 @@ void placeRecognition()
 }
 
 void getLoopEdges()
-{
-    bool anchor_flag = false;
+{    
+    pcl::PointCloud<pcl::PointXYZI>::Ptr FirstMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::io::loadPCDFile(dir1_map_path, *FirstMapCloud);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr SecondMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::io::loadPCDFile(dir2_map_path, *SecondMapCloud);
+    std::vector<int> first_indices;
+    std::vector<int> second_indices;
+    pcl::removeNaNFromPointCloud(*FirstMapCloud, *FirstMapCloud, first_indices);
+    pcl::removeNaNFromPointCloud(*SecondMapCloud, *SecondMapCloud, second_indices);
+    kiss_matcher::KISSMatcherConfig config = kiss_matcher::KISSMatcherConfig(anchor_resolution);
+    kiss_matcher::KISSMatcher matcher(config);  
+
+    const auto& src_vec = convertCloudToVec(*SecondMapCloud);
+    const auto& tgt_vec = convertCloudToVec(*FirstMapCloud);
+
+    const auto solution = matcher.estimate(src_vec, tgt_vec);
+    Eigen::Matrix4d solution_eigen      = Eigen::Matrix4d::Identity();
+    solution_eigen.block<3, 3>(0, 0)    = solution.rotation;
+    solution_eigen.topRightCorner(3, 1) = solution.translation;
+
+    A2_anchor = gtsam::Pose3(solution_eigen);
+
     int solidSize = solidModule.getSolidSize();
     for (int k = FirstMapSize; k < solidSize; k++)
     {         
@@ -888,17 +925,6 @@ void getLoopEdges()
                     << robustNoiseVector6(4) << " " << robustNoiseVector6(5) << endl;
                 pair<int, int> loop_pair = make_pair(prev_node_idx, curr_node_idx);
                 loop_pairs.push_back(loop_pair);
-
-                if (!anchor_flag)
-                {
-                    // 로컬 포즈(파일에서 읽은) -> GTSAM Pose3
-                    gtsam::Pose3 T1j = Pose6toGTSAMPose3(FirstMapPoses[prev_node_idx]);
-                    anchor_idx = curr_node_idx;
-
-                    A2_anchor = T1j.compose(relative_pose);
-                    
-                    anchor_flag = true;
-                }
             }    
         }       
     }
@@ -961,14 +987,16 @@ void getPoses()
     for (int k = 0; k < SecondMapSize; k++)
     {        
         Pose6 current_pose = SecondMapPoses[k];
-        Pose6 anchor_pose = SecondMapPoses[anchor_idx];
-        gtsam::Pose3 poseAnchor = Pose6toGTSAMPose3(anchor_pose);
         gtsam::Pose3 poseCurr = Pose6toGTSAMPose3(current_pose);
         // odom factor
-        gtsam::Pose3 relPose = poseAnchor.between(poseCurr);
-        Eigen::Matrix4d rel_TF = relPose.matrix();
+        // gtsam::Pose3 relPose = poseAnchor.between(poseCurr);
+        // Eigen::Matrix4d rel_TF = relPose.matrix();
+        // Eigen::Matrix4d anchor_TF = A2_anchor.matrix();
+        // Eigen::Matrix4d anchor_curr_TF = anchor_TF * rel_TF;
+        // gtsam::Pose3 poseAnchorCurr(anchor_curr_TF);
+        Eigen::Matrix4d curr_TF = poseCurr.matrix();
         Eigen::Matrix4d anchor_TF = A2_anchor.matrix();
-        Eigen::Matrix4d anchor_curr_TF = anchor_TF * rel_TF;
+        Eigen::Matrix4d anchor_curr_TF = anchor_TF * curr_TF;
         gtsam::Pose3 poseAnchorCurr(anchor_curr_TF);
 
         geometry_msgs::msg::PoseStamped poseStamped;
