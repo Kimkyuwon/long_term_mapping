@@ -119,14 +119,6 @@ Each session directory must follow this structure (compatible with the output of
 
 ## Dependencies
 
-### ROS2 Packages
-| Package | Version |
-|---|---|
-| ROS2 | Jazzy (Ubuntu 24.04) |
-| `rclcpp` | ament |
-| `pcl_ros` | ament |
-| `sensor_msgs`, `nav_msgs`, `geometry_msgs`, `visualization_msgs`, `tf2*` | standard |
-
 ### System Libraries
 | Library | Purpose | Install |
 |---|---|---|
@@ -142,7 +134,6 @@ Each session directory must follow this structure (compatible with the output of
 | Library | Purpose | Notes |
 |---|---|---|
 | [KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher) | Global point cloud registration | Source bundled in `include/kiss_matcher/` |
-| [ROBIN](https://github.com/MIT-SPARK/ROBIN) | Rotation-invariant outlier rejection (KISS-Matcher dep.) | Auto-downloaded via CMake FetchContent on first build |
 
 ### Third-party ROS2 Packages (source build)
 | Package | Notes |
@@ -216,8 +207,6 @@ Edit `config/params.yaml` before launching:
     directory1: /path/to/session1          # Central (reference) session
     directory2: /path/to/session2          # Query (new) session
     output_directory: output               # Relative to package root
-
-    # ── Preprocessing ──────────────────────────────────────────────────────
     blind: 1.0                             # Ignore returns within this radius [m]
 
     # ── KISS-Matcher (inter-session global registration) ───────────────────
@@ -324,6 +313,37 @@ The `Debug/ND.pcd` and `Debug/PD.pcd` files can be fed into a downstream change-
 
 ## Algorithm Details
 
+### 0. Global Map Registration (KISS-Matcher)
+
+Before any keyframe-level loop detection, **KISS-Matcher** computes a coarse global registration between the two full static maps. This produces an initial inter-session transform `A2_anchor` — the 6-DOF rigid body transform that aligns Session 2's coordinate frame onto Session 1's world frame.
+
+**Why global registration first?**
+
+| Approach | Problem |
+|---|---|
+| SOLiD loop-only anchor | Anchor quality depends on a single matched keyframe pair; fails if the first detected loop has low-quality geometry |
+| KISS-Matcher global anchor | Uses the entire static map for alignment — robust to partial overlaps and scene changes |
+
+**Processing pipeline:**
+
+```
+Session 1 StaticMap.pcd  ──┐
+                            ├── KISS-Matcher.estimate(src=Map2, tgt=Map1)
+Session 2 StaticMap.pcd  ──┘
+        │
+        ▼
+  solution.rotation (3×3)   }
+  solution.translation (3×1) }  →  A2_anchor = gtsam::Pose3(solution_eigen)
+```
+
+**Key parameters (`config/params.yaml`):**
+
+| Parameter | Description |
+|---|---|
+| `anchor_resolution` | Voxel downsampling resolution for KISS-Matcher [m]. Larger values run faster but reduce accuracy. Typical range: 1.0–3.0 m |
+
+> The input `StaticMap.pcd` should be the static-only map (dynamic objects removed) from each session, compatible with the output of [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization).
+
 ### 1. Inter-session Loop Detection (SOLiD)
 
 SOLiD (Spatial Overlap with LiDAR Descriptor) builds a rotation-invariant 3D histogram from each keyframe scan parameterised in cylindrical coordinates `(angle, range, height)`. The cosine similarity between descriptors identifies candidate loop pairs across sessions without any initial alignment assumption.
@@ -364,11 +384,11 @@ This package integrates or adapts the following open-source works:
 
 | Library / Code | Authors | License | Link |
 |---|---|---|---|
+| **KISS-Matcher** | Hyungtae Lim et al. | MIT | [MIT-SPARK/KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher) |
+| **ROBIN** | MIT-SPARK Lab | MIT | [MIT-SPARK/ROBIN](https://github.com/MIT-SPARK/ROBIN) |
 | **SOLiD descriptor** | Hogyun Kim et al. | MIT | [sparolab/solid](https://github.com/sparolab/solid) |
 | **NanoGICP** | Ken Nakamura | MIT | [engcang/nano_gicp](https://github.com/engcang/nano_gicp) |
-| **nanoflann** | Jose Luis Blanco | BSD-2 | [jlblancoc/nanoflann](https://github.com/jlblancoc/nanoflann) |
 | **GTSAM** | Frank Dellaert et al. | BSD-2 | [borglab/gtsam](https://github.com/borglab/gtsam) |
-| **CurvedVoxelClustering** | btran | MIT | based on [Curved-Voxel-Clustering](https://github.com/wangx1996/Curved-Voxel-Clustering) |
 
 ---
 
