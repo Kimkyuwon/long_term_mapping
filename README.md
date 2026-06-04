@@ -313,23 +313,34 @@ The `Debug/ND.pcd` and `Debug/PD.pcd` files can be fed into a downstream change-
 
 ## Algorithm Details
 
-### 0. Global Map Registration (KISS-Matcher)
+### 1. Global Alignment & Anchor-node Pose-graph Optimization
 
-Before any keyframe-level loop detection, **KISS-Matcher** computes a coarse global registration between the two full maps. This produces an initial inter-session transform — the 6-DOF rigid body transform that aligns Session 2's coordinate frame onto Session 1's world frame.
+#### 1-1. Why global alignment first?
 
-**Key parameters (`config/params.yaml`):**
+Each session builds its own local map from an arbitrary starting pose, so their coordinate frames are unrelated. GTSAM's iSAM2 is a **nonlinear** optimiser that linearises the cost function around the current estimate at every iteration. If Session 2 nodes are initialised far from their true positions in Session 1's frame, two failure modes occur:
+
+1. **Linearisation error** — the Jacobian computed at a wrong operating point points in the wrong direction, causing divergence or convergence to a bad local minimum.
+2. **Cauchy kernel saturation** — loop closure edges use a Cauchy robust kernel (parameter = 1.0). When the residual of a loop edge greatly exceeds the Cauchy threshold, the kernel saturates and the edge's effective weight drops to near zero. Even with many correct inter-session loops, the optimiser treats them all as outliers and ignores them.
+
+#### 1-2. Initial inter-session transform via KISS-Matcher (`A2_anchor`)
+
+Before any keyframe-level loop detection, **KISS-Matcher** registers the two full static maps to compute `A2_anchor` — a 6-DOF rigid body transform that maps Session 2's coordinate frame into Session 1's world frame. This transform serves as the initial estimate for all Session 2 nodes, placing them close enough to their true positions for iSAM2 to converge reliably.
 
 | Parameter | Description |
 |---|---|
-| `anchor_resolution` | Voxel downsampling resolution for KISS-Matcher [m]. Larger values run faster but reduce accuracy. Typical range: 1.0–3.0 m |
+| `anchor_resolution` | Voxel downsampling resolution for KISS-Matcher [m]. Larger values are faster but less accurate. Typical range: 1.0–3.0 m |
 
-> The input `StaticMap.pcd` should be the static-only map (dynamic objects removed) from each session, compatible with the output of [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization).
+> `StaticMap.pcd` must be the static-only point cloud map (dynamic objects removed), compatible with the output of [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization).
 
-### 1. Inter-session Loop Detection (SOLiD)
+#### 1-3. Anchor-node pose-graph optimization
+
+Following the anchor-node formulation [[Kim et al.]](https://ieeexplore.ieee.org/abstract/document/9811916/), Session 1's first node is fixed with near-zero covariance (prior `Δ_C`), while Session 2's first node is initialised from `A2_anchor` with large covariance (prior `Δ_Q`), allowing it to be corrected by inter-session loop factors. iSAM2 then jointly optimises both sessions' internal drifts and the inter-session relative offset. Cauchy M-estimators on loop factors suppress any remaining false positives.
+
+### 2. Inter-session Loop Detection (SOLiD)
 
 SOLiD (Spatial Overlap with LiDAR Descriptor) builds a rotation-invariant 3D histogram from each keyframe scan parameterised in cylindrical coordinates `(angle, range, height)`. The cosine similarity between descriptors identifies candidate loop pairs across sessions without any initial alignment assumption.
 
-### 2. Scan Matching with DOP Rejection
+### 3. Scan Matching with DOP Rejection
 
 Candidate pairs are refined with NanoGICP. To reject geometrically degenerate matches (e.g., long corridors), a **Dilution of Precision (DOP)** metric is computed from the matched point distribution. The DOP ratio
 
@@ -338,12 +349,6 @@ DOP_ratio = matching_DOP / max(curr_DOP, target_DOP)
 ```
 
 must fall below `dop_thres`; matches with a high DOP ratio indicate insufficient geometric constraint and are discarded.
-
-### 3. Anchor-node Pose-graph Optimization
-
-Following the anchor-node formulation [Kim et al.](https://ieeexplore.ieee.org/abstract/document/9811916/), each session maintains its own coordinate frame. The central session anchor `Δ_C` is fixed with near-zero covariance; the query anchor `Δ_Q` has large initial covariance. Inter-session loop factors are expressed relative to both anchors, allowing iSAM2 to jointly estimate the sessions' internal drifts and their relative offset.
-
-Robust Cauchy M-estimators are applied to all loop factors to handle false positives.
 
 ### 4. Tile-based Change Detection
 
