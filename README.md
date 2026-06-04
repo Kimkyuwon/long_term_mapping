@@ -315,26 +315,7 @@ The `Debug/ND.pcd` and `Debug/PD.pcd` files can be fed into a downstream change-
 
 ### 0. Global Map Registration (KISS-Matcher)
 
-Before any keyframe-level loop detection, **KISS-Matcher** computes a coarse global registration between the two full static maps. This produces an initial inter-session transform `A2_anchor` — the 6-DOF rigid body transform that aligns Session 2's coordinate frame onto Session 1's world frame.
-
-**Why global registration first?**
-
-| Approach | Problem |
-|---|---|
-| SOLiD loop-only anchor | Anchor quality depends on a single matched keyframe pair; fails if the first detected loop has low-quality geometry |
-| KISS-Matcher global anchor | Uses the entire static map for alignment — robust to partial overlaps and scene changes |
-
-**Processing pipeline:**
-
-```
-Session 1 StaticMap.pcd  ──┐
-                            ├── KISS-Matcher.estimate(src=Map2, tgt=Map1)
-Session 2 StaticMap.pcd  ──┘
-        │
-        ▼
-  solution.rotation (3×3)   }
-  solution.translation (3×1) }  →  A2_anchor = gtsam::Pose3(solution_eigen)
-```
+Before any keyframe-level loop detection, **KISS-Matcher** computes a coarse global registration between the two full maps. This produces an initial inter-session transform — the 6-DOF rigid body transform that aligns Session 2's coordinate frame onto Session 1's world frame.
 
 **Key parameters (`config/params.yaml`):**
 
