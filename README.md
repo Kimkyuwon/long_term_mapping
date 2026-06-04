@@ -67,7 +67,7 @@ main()
  ├── placeRecognition()     — SOLiD-based inter-session loop detection
  ├── getLoopEdges()         — KISS-Matcher global registration (A2_anchor) + NanoGICP loop edges
  ├── getPoses()             — add anchor-node prior/loop factors
- ├── runISAM2opt()          — iSAM2 pose-graph optimisation + updatePoses()
+ ├── runISAM2opt()          — iSAM2 pose-graph optimization + updatePoses()
  ├── generateOptimizedMap() — assemble merged PCD maps
  ├── MapUpdate()            — tile-based ND/PD change detection
  └── saveEdges()            — write merged edge file
@@ -79,8 +79,8 @@ main()
 |---|---|
 | **KISS-Matcher** | Global point cloud registration to compute initial inter-session transform (A2_anchor) |
 | **SOLiDModule** | Rotation-invariant global descriptor for inter-session loop candidates |
-| **NanoGICP** | Fast generalised ICP for 6-DOF relative pose estimation |
-| **GTSAM iSAM2** | Incremental Bayesian pose-graph optimiser |
+| **NanoGICP** | Fast generalized ICP for 6-DOF relative pose estimation |
+| **GTSAM iSAM2** | Incremental Bayesian pose-graph optimizer |
 | **DOP filter** | Dilution-of-Precision metric to reject geometrically degenerate loop/change detections |
 | **CurvedVoxelClustering** | Curved-voxel-based Euclidean clustering for object-level segmentation |
 
@@ -124,8 +124,8 @@ Each session directory must follow this structure (compatible with the output of
 |---|---|---|
 | [PCL](https://pointclouds.org/) ≥ 1.12 | Point cloud processing | `sudo apt install libpcl-dev` |
 | [Eigen3](https://eigen.tuxfamily.org/) ≥ 3.4 | Linear algebra | `sudo apt install libeigen3-dev` |
-| [GTSAM](https://gtsam.org/) ≥ 4.1 | Pose-graph optimisation | see below |
-| OpenMP | Parallelisation | `sudo apt install libomp-dev` |
+| [GTSAM](https://gtsam.org/) ≥ 4.1 | Pose-graph optimization | see below |
+| OpenMP | Parallelization | `sudo apt install libomp-dev` |
 | [flann](https://github.com/flann-lib/flann) | Approximate nearest neighbours (KISS-Matcher) | `sudo apt install libflann-dev` |
 | [lz4](https://github.com/lz4/lz4) | Compression (KISS-Matcher) | `sudo apt install liblz4-dev` |
 | [oneTBB](https://github.com/oneapi-src/oneTBB) | Parallelism (KISS-Matcher) | `sudo apt install libtbb-dev` |
@@ -142,7 +142,7 @@ Each session directory must follow this structure (compatible with the output of
 | [SOLiD](https://github.com/sparolab/solid) | Place recognition descriptor |
 | [patchworkpp](https://github.com/url-kaist/patchwork-plusplus) | Ground segmentation (optional, commented out) |
 | [fast_lio2_mapping_and_localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) | LiDAR-Inertial odometry / keyframe producer |
-| [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) | Single-session pose-graph optimisation & keyframe export |
+| [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) | Single-session pose-graph optimization & keyframe export |
 
 ### GTSAM Installation
 ```bash
@@ -231,20 +231,10 @@ Edit `config/params.yaml` before launching:
 
 ## Running
 
-### Launch with RViz
+### Launch 
 
 ```bash
-ros2 launch long_term_mapping lt_mapper.launch.py \
-    config_path:=/path/to/config \
-    config_file:=params.yaml \
-    rviz:=true
-```
-
-### Launch without RViz
-
-```bash
-ros2 launch long_term_mapping lt_mapper.launch.py \
-    rviz:=false
+ros2 launch long_term_mapping lt_mapper.launch.py 
 ```
 
 ### Expected Console Output
@@ -274,11 +264,11 @@ output_directory: Merged
 | `/first_kf_node` | `sensor_msgs/PointCloud2` | Session 1 keyframe positions |
 | `/second_kf_node` | `sensor_msgs/PointCloud2` | Session 2 keyframe positions |
 | `/merge_kf_node` | `sensor_msgs/PointCloud2` | Merged keyframe positions |
-| `/First_path` | `nav_msgs/Path` | Session 1 optimised trajectory |
-| `/Second_path` | `nav_msgs/Path` | Session 2 optimised trajectory |
+| `/First_path` | `nav_msgs/Path` | Session 1 optimized trajectory |
+| `/Second_path` | `nav_msgs/Path` | Session 2 optimized trajectory |
 | `/Merge_path` | `nav_msgs/Path` | Combined trajectory |
 | `/Merge_map` | `sensor_msgs/PointCloud2` | Full merged point cloud map |
-| `/loopLine` | `visualization_msgs/Marker` | Inter-session loop constraint visualisation |
+| `/loopLine` | `visualization_msgs/Marker` | Inter-session loop constraint visualization |
 | `/lt_mapping_complete` | `std_msgs/Bool` | Published `true` upon completion |
 
 ---
@@ -289,7 +279,7 @@ All outputs are written to `<package_root>/<output_directory>/`:
 
 ```
 <output_directory>/
-├── FirstMap.pcd              ← Session 1 full map (optimised poses)
+├── FirstMap.pcd              ← Session 1 full map (optimized poses)
 ├── FirstGroundMap.pcd        ← Session 1 ground points
 ├── FirstNonGroundMap.pcd     ← Session 1 non-ground points
 ├── SecondMap.pcd             ← Session 2 full map
@@ -317,10 +307,10 @@ The `Debug/ND.pcd` and `Debug/PD.pcd` files can be fed into a downstream change-
 
 #### 1-1. Why global alignment first?
 
-Each session builds its own local map from an arbitrary starting pose, so their coordinate frames are unrelated. GTSAM's iSAM2 is a **nonlinear** optimiser that linearises the cost function around the current estimate at every iteration. If Session 2 nodes are initialised far from their true positions in Session 1's frame, two failure modes occur:
+Each session builds its own local map from an arbitrary starting pose, so their coordinate frames are unrelated. GTSAM's iSAM2 is a **nonlinear** optimizer that linearizes the cost function around the current estimate at every iteration. If Session 2 nodes are initialized far from their true positions in Session 1's frame, two failure modes occur:
 
-1. **Linearisation error** — the Jacobian computed at a wrong operating point points in the wrong direction, causing divergence or convergence to a bad local minimum.
-2. **Cauchy kernel saturation** — loop closure edges use a Cauchy robust kernel (parameter = 1.0). When the residual of a loop edge greatly exceeds the Cauchy threshold, the kernel saturates and the edge's effective weight drops to near zero. Even with many correct inter-session loops, the optimiser treats them all as outliers and ignores them.
+1. **Linearization error** — the Jacobian computed at a wrong operating point points in the wrong direction, causing divergence or convergence to a bad local minimum.
+2. **Cauchy kernel saturation** — loop closure edges use a Cauchy robust kernel (parameter = 1.0). When the residual of a loop edge greatly exceeds the Cauchy threshold, the kernel saturates and the edge's effective weight drops to near zero. Even with many correct inter-session loops, the optimizer treats them all as outliers and ignores them.
 
 #### 1-2. Initial inter-session transform via KISS-Matcher (`A2_anchor`)
 
@@ -334,11 +324,11 @@ Before any keyframe-level loop detection, **KISS-Matcher** registers the two ful
 
 #### 1-3. Anchor-node pose-graph optimization
 
-Following the anchor-node formulation [[Kim et al.]](https://ieeexplore.ieee.org/abstract/document/9811916/), Session 1's first node is fixed with near-zero covariance (prior `Δ_C`), while Session 2's first node is initialised from `A2_anchor` with large covariance (prior `Δ_Q`), allowing it to be corrected by inter-session loop factors. iSAM2 then jointly optimises both sessions' internal drifts and the inter-session relative offset. Cauchy M-estimators on loop factors suppress any remaining false positives.
+Following the anchor-node formulation [[Kim et al.]](https://ieeexplore.ieee.org/abstract/document/9811916/), Session 1's first node is fixed with near-zero covariance (prior `Δ_C`), while Session 2's first node is initialized from `A2_anchor` with large covariance (prior `Δ_Q`), allowing it to be corrected by inter-session loop factors. iSAM2 then jointly optimizes both sessions' internal drifts and the inter-session relative offset. Cauchy M-estimators on loop factors suppress any remaining false positives.
 
 ### 2. Inter-session Loop Detection (SOLiD)
 
-SOLiD (Spatial Overlap with LiDAR Descriptor) builds a rotation-invariant 3D histogram from each keyframe scan parameterised in cylindrical coordinates `(angle, range, height)`. The cosine similarity between descriptors identifies candidate loop pairs across sessions without any initial alignment assumption.
+SOLiD (Spatial Overlap with LiDAR Descriptor) builds a rotation-invariant 3D histogram from each keyframe scan parameterized in cylindrical coordinates `(angle, range, height)`. The cosine similarity between descriptors identifies candidate loop pairs across sessions without any initial alignment assumption.
 
 ### 3. Scan Matching with DOP Rejection
 
@@ -352,7 +342,7 @@ must fall below `dop_thres`; matches with a high DOP ratio indicate insufficient
 
 ### 4. Tile-based Change Detection
 
-After trajectory optimisation, the merged map is partitioned into 2D tiles. For each tile:
+After trajectory optimization, the merged map is partitioned into 2D tiles. For each tile:
 - Points from Session 1 not found within `voxel_size` in Session 2 → **ND candidates**
 - Points from Session 2 not found within `voxel_size` in Session 1 → **PD candidates**
 
