@@ -8,6 +8,8 @@
 #include <optional>
 #include <chrono>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
 #include <std_msgs/msg/bool.hpp>
@@ -1063,16 +1065,160 @@ void MapUpdate()
     pcl::PointCloud<pcl::PointXYZI>::Ptr optimizedMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
     pcl::PointCloud<pcl::PointXYZI>::Ptr FirstMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
     pcl::PointCloud<pcl::PointXYZI>::Ptr SecondMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::PointCloud<pcl::PointXYZI>::Ptr FirstNGMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::PointCloud<pcl::PointXYZI>::Ptr SecondNGMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
     pcl::io::loadPCDFile(save_directory + "FirstMap.pcd", *FirstMapCloud);
     pcl::io::loadPCDFile(save_directory + "SecondMap.pcd", *SecondMapCloud);
-    pcl::io::loadPCDFile(save_directory + "FirstNonGroundMap.pcd", *FirstNGMapCloud);
-    pcl::io::loadPCDFile(save_directory + "SecondNonGroundMap.pcd", *SecondNGMapCloud);
     *optimizedMapCloud += *FirstMapCloud;
     *optimizedMapCloud += *SecondMapCloud;
 
-        // 1. 전체 지도 범위 계산
+    // ── 이진 격자 기반 미탐지 구역 검출 (2D XY 평면 투영) ───────────────
+    // XY 격자 인덱스(ix, iy)를 int64_t 하나로 패킹 (각 32비트, Z 무시)
+    auto packVoxelKey = [](int ix, int iy) -> int64_t {
+        return ((int64_t)(uint32_t)ix) | ((int64_t)(uint32_t)iy << 32);
+    };
+    auto pointToKey = [&](const pcl::PointXYZI& pt) -> int64_t {
+        int ix = static_cast<int>(std::floor(pt.x / 2));
+        int iy = static_cast<int>(std::floor(pt.y / 2));
+        return packVoxelKey(ix, iy);
+    };
+
+    pcl::VoxelGrid<pcl::PointXYZI> downSizeMapFilter;
+    downSizeMapFilter.setLeafSize(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+
+    // SecondMapCloud → 이진 격자 (점 존재 여부)
+    std::unordered_set<int64_t> secondMapVoxels;
+    secondMapVoxels.reserve(SecondMapCloud->points.size());
+    for (const auto& pt : SecondMapCloud->points)
+        secondMapVoxels.insert(pointToKey(pt));
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
+    for (int i = 0; i < FirstMapSize; i++) 
+    {
+        int global_key = getGlobalNodeIdx(1, i);
+        Pose6 keyPose;
+        keyPose.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
+        keyPose.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
+        keyPose.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
+        keyPose.roll = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll();
+        keyPose.pitch = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch();
+        keyPose.yaw = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw();
+
+        Eigen::Matrix4f TF = createTransformMatrix(keyPose);
+
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadPointCloud(dir1_scans_path + to_string(i) + ".pcd");
+        pcl::transformPointCloud(*cureKeyframeCloud, *cureKeyframeCloud, TF);
+        downSizeMapFilter.setInputCloud(cureKeyframeCloud);
+        downSizeMapFilter.filter(*cureKeyframeCloud);
+
+        // 스캔 격자 구성: 격자 키 → 포인트 인덱스 목록
+        std::unordered_map<int64_t, std::vector<int>> scanVoxelMap;
+        scanVoxelMap.reserve(cureKeyframeCloud->points.size());
+        for (int k = 0; k < (int)cureKeyframeCloud->points.size(); k++)
+            scanVoxelMap[pointToKey(cureKeyframeCloud->points[k])].push_back(k);
+
+        // 스캔=1, 지도=0 인 격자의 포인트 → unmatching_cloud
+        pcl::PointCloud<pcl::PointXYZI>::Ptr unmatching_cloud(new pcl::PointCloud<pcl::PointXYZI>());
+        for (const auto& [key, indices] : scanVoxelMap)
+        {
+            if (secondMapVoxels.count(key) == 0)
+            {
+                for (int idx : indices)
+                    unmatching_cloud->points.push_back(cureKeyframeCloud->points[idx]);
+            }
+        }
+
+        Eigen::Vector3d MapNode(TF(0,3), TF(1,3), TF(2,3));
+        double UE_dop = computeDOP(unmatching_cloud, MapNode);
+        if (UE_dop < 1.0)
+        {
+            *FirstUE_Cloud += *unmatching_cloud;
+        }
+    }
+
+    // FirstMapCloud → 이진 격자 (점 존재 여부)
+    std::unordered_set<int64_t> firstMapVoxels;
+    firstMapVoxels.reserve(FirstMapCloud->points.size());
+    for (const auto& pt : FirstMapCloud->points)
+        firstMapVoxels.insert(pointToKey(pt));
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
+    for (int i = 0; i < SecondMapSize; i++) 
+    {
+        int global_key = getGlobalNodeIdx(2, i);
+        Pose6 keyPose;
+        keyPose.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
+        keyPose.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
+        keyPose.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
+        keyPose.roll = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll();
+        keyPose.pitch = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch();
+        keyPose.yaw = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw();
+
+        Eigen::Matrix4f TF = createTransformMatrix(keyPose);
+
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + ".pcd");
+        pcl::transformPointCloud(*cureKeyframeCloud, *cureKeyframeCloud, TF);
+        downSizeMapFilter.setInputCloud(cureKeyframeCloud);
+        downSizeMapFilter.filter(*cureKeyframeCloud);
+
+        // 스캔 격자 구성: 격자 키 → 포인트 인덱스 목록
+        std::unordered_map<int64_t, std::vector<int>> scanVoxelMap;
+        scanVoxelMap.reserve(cureKeyframeCloud->points.size());
+        for (int k = 0; k < (int)cureKeyframeCloud->points.size(); k++)
+            scanVoxelMap[pointToKey(cureKeyframeCloud->points[k])].push_back(k);
+
+        // 스캔=1, 지도=0 인 격자의 포인트 → unmatching_cloud
+        pcl::PointCloud<pcl::PointXYZI>::Ptr unmatching_cloud(new pcl::PointCloud<pcl::PointXYZI>());
+        for (const auto& [key, indices] : scanVoxelMap)
+        {
+            if (firstMapVoxels.count(key) == 0)
+            {
+                for (int idx : indices)
+                    unmatching_cloud->points.push_back(cureKeyframeCloud->points[idx]);
+            }
+        }
+
+        Eigen::Vector3d MapNode(TF(0,3), TF(1,3), TF(2,3));
+        double UE_dop = computeDOP(unmatching_cloud, MapNode);
+        if (UE_dop < 1.0)
+        {
+            *SecondUE_Cloud += *unmatching_cloud;
+        }
+    }
+
+    if (FirstUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "FirstUE" + ".pcd", *FirstUE_Cloud); 
+    if (SecondUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "SecondUE" + ".pcd", *SecondUE_Cloud); 
+
+    // ── UE_Cloud 격자 집합 구성 후 지도에서 미탐지 구역 점 제거 ──────────
+    // FirstUE_Cloud → 격자 집합
+    std::unordered_set<int64_t> firstUEVoxels;
+    firstUEVoxels.reserve(FirstUE_Cloud->points.size());
+    for (const auto& pt : FirstUE_Cloud->points)
+        firstUEVoxels.insert(pointToKey(pt));
+
+    // FirstMapCloud에서 UE 격자에 속하는 점 제거
+    pcl::PointCloud<pcl::PointXYZI>::Ptr FirstMapFiltered(new pcl::PointCloud<pcl::PointXYZI>());
+    FirstMapFiltered->reserve(FirstMapCloud->points.size());
+    for (const auto& pt : FirstMapCloud->points)
+    {
+        if (firstUEVoxels.count(pointToKey(pt)) == 0)
+            FirstMapFiltered->points.push_back(pt);
+    }
+
+    // SecondUE_Cloud → 격자 집합
+    std::unordered_set<int64_t> secondUEVoxels;
+    secondUEVoxels.reserve(SecondUE_Cloud->points.size());
+    for (const auto& pt : SecondUE_Cloud->points)
+        secondUEVoxels.insert(pointToKey(pt));
+
+    // SecondMapCloud에서 UE 격자에 속하는 점 제거
+    pcl::PointCloud<pcl::PointXYZI>::Ptr SecondMapFiltered(new pcl::PointCloud<pcl::PointXYZI>());
+    SecondMapFiltered->reserve(SecondMapCloud->points.size());
+    for (const auto& pt : SecondMapCloud->points)
+    {
+        if (secondUEVoxels.count(pointToKey(pt)) == 0)
+            SecondMapFiltered->points.push_back(pt);
+    }
+
+    // 1. 전체 지도 범위 계산
     float min_x = std::numeric_limits<float>::max();
     float max_x = std::numeric_limits<float>::lowest();
     float min_y = std::numeric_limits<float>::max();
@@ -1101,8 +1247,8 @@ void MapUpdate()
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr PD_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
     pcl::PointCloud<pcl::PointXYZI>::Ptr ND_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
+    // pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
+    // pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
     for (int ix = 0; ix < num_x; ++ix) 
     {
         for (int iy = 0; iy < num_y; ++iy) 
@@ -1121,10 +1267,10 @@ void MapUpdate()
             crop_filter.setMax(max_point);
 
             pcl::PointCloud<pcl::PointXYZI>::Ptr FirstMapCrop(new pcl::PointCloud<pcl::PointXYZI>());
-            crop_filter.setInputCloud(FirstMapCloud);
+            crop_filter.setInputCloud(FirstMapFiltered);
             crop_filter.filter(*FirstMapCrop);
             pcl::PointCloud<pcl::PointXYZI>::Ptr SecondMapCrop(new pcl::PointCloud<pcl::PointXYZI>());
-            crop_filter.setInputCloud(SecondMapCloud);
+            crop_filter.setInputCloud(SecondMapFiltered);
             crop_filter.filter(*SecondMapCrop);
             std::for_each(FirstMapCrop->points.begin(), FirstMapCrop->points.end(),
                         [](pcl::PointXYZI& point) { point.intensity = 10.0; });
@@ -1138,13 +1284,10 @@ void MapUpdate()
             if (MergeMapCrop->empty()) continue;
             Eigen::Vector3d Central_point((tile_min_x + tile_max_x) / 2.0f, (tile_min_y + tile_max_y) / 2.0f, 0.0f);
 
-            double First_dop = computeDOP(FirstMapCrop, Central_point);
-            double Second_dop = computeDOP(SecondMapCrop, Central_point);
-
             pcl::PointCloud<pcl::PointXYZI>::Ptr PDCrop(new pcl::PointCloud<pcl::PointXYZI>());
             pcl::PointCloud<pcl::PointXYZI>::Ptr NDCrop(new pcl::PointCloud<pcl::PointXYZI>());
-            pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE(new pcl::PointCloud<pcl::PointXYZI>());
-            pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE(new pcl::PointCloud<pcl::PointXYZI>());
+            // pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE(new pcl::PointCloud<pcl::PointXYZI>());
+            // pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE(new pcl::PointCloud<pcl::PointXYZI>());
 
             if (SecondMapCrop->points.size() > 0 )
             {
@@ -1166,14 +1309,14 @@ void MapUpdate()
                     }
                 }
                 double matching_dop = computeDOP(matching_cloud, Central_point);
-                double First_ratio = matching_dop/First_dop;
-                if (First_ratio > 1.5)
-                {                    
-                    *FirstUE = *NDCrop;
-                    NDCrop->points.clear();
-                }
+                // double First_ratio = matching_dop/First_dop;
+                // if (First_ratio > 1.5)
+                // {                    
+                //     *FirstUE = *NDCrop;
+                //     NDCrop->points.clear();
+                // }
                 *ND_Cloud += *NDCrop;
-                *FirstUE_Cloud += *FirstUE;
+                // *FirstUE_Cloud += *FirstUE;
             }            
                     
             if (FirstMapCrop->points.size() > 0 )
@@ -1195,15 +1338,15 @@ void MapUpdate()
                         PDCrop->points.push_back(SecondMapCrop->points[k]);
                     }
                 }
-                double matching_dop = computeDOP(matching_cloud, Central_point);
-                double Second_ratio = matching_dop/Second_dop;
-                if (Second_ratio > 1.5)
-                {        
-                    *SecondUE = *PDCrop;
-                    PDCrop->points.clear();
-                }
+                // double matching_dop = computeDOP(matching_cloud, Central_point);
+                // double Second_ratio = matching_dop/Second_dop;
+                // if (Second_ratio > 1.5)
+                // {        
+                //     *SecondUE = *PDCrop;
+                //     PDCrop->points.clear();
+                // }
                 *PD_Cloud += *PDCrop;
-                *SecondUE_Cloud += *SecondUE;
+                // *SecondUE_Cloud += *SecondUE;
             }
         
             // pcl::io::savePCDFileBinary(DebugDirectory + "First" + to_string(ix) + "_" + std::to_string(iy) + "_" + to_string(First_dop) + "_crop.pcd", *FirstMapCrop); 
@@ -1212,13 +1355,14 @@ void MapUpdate()
     }
     if (ND_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "ND" + ".pcd", *ND_Cloud); 
     if (PD_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "PD" + ".pcd", *PD_Cloud); 
-    if (FirstUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "FirstUE" + ".pcd", *FirstUE_Cloud); 
-    if (SecondUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "SecondUE" + ".pcd", *SecondUE_Cloud); 
+    // if (FirstUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "FirstUE" + ".pcd", *FirstUE_Cloud); 
+    // if (SecondUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "SecondUE" + ".pcd", *SecondUE_Cloud); 
 
     sensor_msgs::msg::PointCloud2 map_msg;
     pcl::toROSMsg(*optimizedMapCloud, map_msg);
     map_msg.header.frame_id = "map";
     PubMerge_map->publish(map_msg);
+    pcl::io::savePCDFileBinary(save_directory + "StaticMap.pcd", *optimizedMapCloud); 
 }
 
 void saveEdges()
