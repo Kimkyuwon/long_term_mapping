@@ -341,11 +341,43 @@ must fall below `dop_thres`; matches with a high DOP ratio indicate insufficient
 
 ### 4. Tile-based Change Detection
 
-After trajectory optimization, the merged map is partitioned into 2D tiles. For each tile:
-- Points from Session 1 not found within `voxel_size` in Session 2 → **ND candidates**
-- Points from Session 2 not found within `voxel_size` in Session 1 → **PD candidates**
+Change detection runs in two sequential phases.
 
-A secondary DOP check validates whether the local geometry has sufficient observability before accepting a candidate as a genuine change. High DOP-ratio tiles lack sufficient geometric constraints to reliably detect changes; they are flagged as **unexplored areas (UE)** and stored separately (`*UE.pcd`).
+#### Phase 1 — Unexplored Area (UE) Detection via 2D Binary Voxel Grid
+
+Unexplored areas are regions covered by one session's keyframe scans but absent from the other session's map. A per-scan 2D voxel occupancy test identifies these regions efficiently without a KD-tree search.
+
+**Algorithm for Session 1 UE detection (`FirstUE_Cloud`):**
+
+1. Project `SecondMapCloud` onto the XY plane and insert every point's voxel key into a hash set `secondMapVoxels`.  
+   Each key encodes a 2 m × 2 m grid cell as a single `int64_t`:
+   ```
+   key = (uint32_t)(floor(x / 2))  |  (uint32_t)(floor(y / 2)) << 32
+   ```
+2. For each Session 1 keyframe scan (transformed to world frame and voxel-downsampled):
+   - Build a per-scan voxel map `scanVoxelMap` (key → point indices).
+   - Collect all scan points whose voxel key is **absent** from `secondMapVoxels` into `unmatching_cloud`.
+3. Compute `DOP(unmatching_cloud, keyframe_position)`.  
+   If `DOP < 1.0` (spatially distributed, reliable), add `unmatching_cloud` to `FirstUE_Cloud`.
+
+The same procedure is applied symmetrically to produce `SecondUE_Cloud` using `firstMapVoxels`.
+
+Both UE clouds are saved to `Debug/FirstUE.pcd` and `Debug/SecondUE.pcd`.
+
+#### Phase 2 — UE-filtered PD / ND Computation
+
+Before the tile-based set-difference analysis, map points that fall inside detected UE voxels are removed to prevent unexplored areas from being misclassified as structural changes.
+
+1. Build `firstUEVoxels` and `secondUEVoxels` hash sets from the Phase 1 results.
+2. Filter:
+   - `FirstMapFiltered` = `FirstMapCloud` \ `firstUEVoxels`
+   - `SecondMapFiltered` = `SecondMapCloud` \ `secondUEVoxels`
+3. Partition `FirstMapFiltered` ∪ `SecondMapFiltered` into 100 m × 100 m tiles.  
+   For each tile:
+   - Session 1 points with no neighbour in Session 2 within `voxel_size` → **ND candidates** (disappeared structures)
+   - Session 2 points with no neighbour in Session 1 within `voxel_size` → **PD candidates** (new structures)
+
+The final `ND_Cloud` and `PD_Cloud` therefore contain only genuine structural changes, with unexplored-area artefacts already excluded.
 
 ---
 
