@@ -345,11 +345,11 @@ Change detection runs in two sequential phases.
 
 #### Phase 1 — Unexplored Area (UE) Detection
 
-Each session's keyframe scans are projected onto a 2D binary voxel grid (2 m × 2 m cells, XY plane). Scan voxels that do not overlap with the other session's map grid are classified as **unexplored areas (UE)** and collected into `FirstUE_Cloud` / `SecondUE_Cloud`. A DOP check filters out geometrically degenerate keyframes before accumulation. Both UE clouds are saved to `Debug/FirstUE.pcd` and `Debug/SecondUE.pcd`.
+Each session's keyframe scans are projected onto a 2D binary voxel grid (2 m × 2 m cells, XY plane). Scan voxels that do not overlap with the other session's map grid are classified as **unexplored areas (UE)** . A DOP check filters out geometrically degenerate keyframes before accumulation. Both UE clouds are saved to `Debug/FirstUE.pcd` and `Debug/SecondUE.pcd`.
 
 #### Phase 2 — PD / ND Computation on UE-filtered Maps
 
-UE voxels are removed from each session's map before the set-difference analysis (`FirstMapFiltered`, `SecondMapFiltered`). The merged map is then partitioned into 100 m × 100 m tiles, and for each tile:
+UE points are removed from each session's map before the set-difference analysis. The merged map is then partitioned into 100 m × 100 m tiles, and for each tile:
 - Session 1 points with no neighbour in Session 2 within `voxel_size` → **ND** (disappeared structures)
 - Session 2 points with no neighbour in Session 1 within `voxel_size` → **PD** (new structures)
 
