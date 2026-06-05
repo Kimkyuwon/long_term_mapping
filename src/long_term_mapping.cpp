@@ -1291,7 +1291,6 @@ void MapUpdate()
 
             if (SecondMapCrop->points.size() > 0 )
             {
-                pcl::PointCloud<pcl::PointXYZI>::Ptr matching_cloud(new pcl::PointCloud<pcl::PointXYZI>());
                 std::vector<int> FirstSearchInd;
                 std::vector<float> FirstSearchSqDis;
                 pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr Firstkdtree (new pcl::KdTreeFLANN<pcl::PointXYZI>());
@@ -1299,16 +1298,11 @@ void MapUpdate()
                 for (size_t k = 0; k < FirstMapCrop->points.size(); k++)
                 {
                     Firstkdtree->nearestKSearch(FirstMapCrop->points[k], 1, FirstSearchInd, FirstSearchSqDis);
-                    if (FirstSearchSqDis[0] < VOXEL_SIZE)  
-                    {
-                        matching_cloud->points.push_back(FirstMapCrop->points[k]);
-                    }
-                    else    
+                    if (FirstSearchSqDis[0] > VOXEL_SIZE)  
                     {
                         NDCrop->points.push_back(FirstMapCrop->points[k]);
                     }
                 }
-                double matching_dop = computeDOP(matching_cloud, Central_point);
                 // double First_ratio = matching_dop/First_dop;
                 // if (First_ratio > 1.5)
                 // {                    
@@ -1321,7 +1315,6 @@ void MapUpdate()
                     
             if (FirstMapCrop->points.size() > 0 )
             {    
-                pcl::PointCloud<pcl::PointXYZI>::Ptr matching_cloud(new pcl::PointCloud<pcl::PointXYZI>());
                 std::vector<int> SecondSearchInd;
                 std::vector<float> SecondSearchSqDis;
                 pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr Secondkdtree (new pcl::KdTreeFLANN<pcl::PointXYZI>());
@@ -1329,11 +1322,7 @@ void MapUpdate()
                 for (size_t k = 0; k < SecondMapCrop->points.size(); k++)
                 {
                     Secondkdtree->nearestKSearch(SecondMapCrop->points[k], 1, SecondSearchInd, SecondSearchSqDis);
-                    if (SecondSearchSqDis[0] < VOXEL_SIZE)  
-                    {
-                        matching_cloud->points.push_back(SecondMapCrop->points[k]);
-                    }
-                    else    
+                    if (SecondSearchSqDis[0] > VOXEL_SIZE)  
                     {
                         PDCrop->points.push_back(SecondMapCrop->points[k]);
                     }

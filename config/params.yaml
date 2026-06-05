@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
-    directory1: "/your_work_space/src/long_term_mapping/Campus1"
-    directory2: "/your_work_space/src/long_term_mapping/Campus2"
-    output_directory: "output"
+    directory1: /home/kkw/localization_ws/src/long_term_mapping/Campus1
+    directory2: /home/kkw/localization_ws/src/long_term_mapping/Campus2
+    output_directory: "\u313B\u3134\u3147\u3141\u3134\u3147"
     dop_thres: 1.1
     fov_d: -15.0
     fov_u: 15.0

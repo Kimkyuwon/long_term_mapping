@@ -82,7 +82,6 @@ main()
 | **NanoGICP** | Fast generalized ICP for 6-DOF relative pose estimation |
 | **GTSAM iSAM2** | Incremental Bayesian pose-graph optimizer |
 | **DOP filter** | Dilution-of-Precision metric to reject geometrically degenerate loop/change detections |
-| **CurvedVoxelClustering** | Curved-voxel-based Euclidean clustering for object-level segmentation |
 
 ---
 
@@ -293,8 +292,8 @@ All outputs are written to `<package_root>/<output_directory>/`:
 └── Debug/
     ├── ND.pcd                ← Negative-difference (disappeared) points
     ├── PD.pcd                ← Positive-difference (appeared) points
-    ├── FirstUE.pcd           ← Session 1 under-estimated change points
-    └── SecondUE.pcd          ← Session 2 under-estimated change points
+    ├── FirstUE.pcd           ← Session 1 unexplored area (UE) points
+    └── SecondUE.pcd          ← Session 2 unexplored area (UE) points
 ```
 
 The `Debug/ND.pcd` and `Debug/PD.pcd` files can be fed into a downstream change-management module (e.g., static map construction, dynamic object removal).
@@ -346,11 +345,7 @@ After trajectory optimization, the merged map is partitioned into 2D tiles. For 
 - Points from Session 1 not found within `voxel_size` in Session 2 → **ND candidates**
 - Points from Session 2 not found within `voxel_size` in Session 1 → **PD candidates**
 
-A secondary DOP check validates whether the local geometry has sufficient observability before accepting a candidate as a genuine change. High DOP-ratio tiles are flagged as under-estimated and stored separately (`*UE.pcd`).
-
-### 5. Curved Voxel Clustering
-
-`CurvedVoxelClustering` (CVC) segments the change maps into individual object-level clusters. Unlike standard Euclidean clustering, CVC operates in the original sensor coordinate and groups points that lie on the same curved surface, yielding more coherent object segments.
+A secondary DOP check validates whether the local geometry has sufficient observability before accepting a candidate as a genuine change. High DOP-ratio tiles lack sufficient geometric constraints to reliably detect changes; they are flagged as **unexplored areas (UE)** and stored separately (`*UE.pcd`).
 
 ---
 
@@ -399,4 +394,4 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
 
-> Third-party components (SOLiD, NanoGICP, nanoflann, CurvedVoxelClustering) retain their own licenses as listed in [Acknowledgements](#acknowledgements). All third-party licenses (MIT / BSD-2) are compatible with BSD-2-Clause.
+> Third-party components (SOLiD, NanoGICP, nanoflann) retain their own licenses as listed in [Acknowledgements](#acknowledgements). All third-party licenses (MIT / BSD-2) are compatible with BSD-2-Clause.
