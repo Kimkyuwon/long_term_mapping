@@ -1076,8 +1076,8 @@ void MapUpdate()
         return ((int64_t)(uint32_t)ix) | ((int64_t)(uint32_t)iy << 32);
     };
     auto pointToKey = [&](const pcl::PointXYZI& pt) -> int64_t {
-        int ix = static_cast<int>(std::floor(pt.x / 2));
-        int iy = static_cast<int>(std::floor(pt.y / 2));
+        int ix = static_cast<int>(std::floor(pt.x / 1.5 * VOXEL_SIZE));
+        int iy = static_cast<int>(std::floor(pt.y / 1.5 * VOXEL_SIZE));
         return packVoxelKey(ix, iy);
     };
 
@@ -1247,8 +1247,7 @@ void MapUpdate()
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr PD_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
     pcl::PointCloud<pcl::PointXYZI>::Ptr ND_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
-    // pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
-    // pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE_Cloud(new pcl::PointCloud<pcl::PointXYZI>());
+
     for (int ix = 0; ix < num_x; ++ix) 
     {
         for (int iy = 0; iy < num_y; ++iy) 
@@ -1286,8 +1285,6 @@ void MapUpdate()
 
             pcl::PointCloud<pcl::PointXYZI>::Ptr PDCrop(new pcl::PointCloud<pcl::PointXYZI>());
             pcl::PointCloud<pcl::PointXYZI>::Ptr NDCrop(new pcl::PointCloud<pcl::PointXYZI>());
-            // pcl::PointCloud<pcl::PointXYZI>::Ptr FirstUE(new pcl::PointCloud<pcl::PointXYZI>());
-            // pcl::PointCloud<pcl::PointXYZI>::Ptr SecondUE(new pcl::PointCloud<pcl::PointXYZI>());
 
             if (SecondMapCrop->points.size() > 0 )
             {
@@ -1303,14 +1300,7 @@ void MapUpdate()
                         NDCrop->points.push_back(FirstMapCrop->points[k]);
                     }
                 }
-                // double First_ratio = matching_dop/First_dop;
-                // if (First_ratio > 1.5)
-                // {                    
-                //     *FirstUE = *NDCrop;
-                //     NDCrop->points.clear();
-                // }
                 *ND_Cloud += *NDCrop;
-                // *FirstUE_Cloud += *FirstUE;
             }            
                     
             if (FirstMapCrop->points.size() > 0 )
@@ -1327,31 +1317,49 @@ void MapUpdate()
                         PDCrop->points.push_back(SecondMapCrop->points[k]);
                     }
                 }
-                // double matching_dop = computeDOP(matching_cloud, Central_point);
-                // double Second_ratio = matching_dop/Second_dop;
-                // if (Second_ratio > 1.5)
-                // {        
-                //     *SecondUE = *PDCrop;
-                //     PDCrop->points.clear();
-                // }
                 *PD_Cloud += *PDCrop;
-                // *SecondUE_Cloud += *SecondUE;
             }
-        
-            // pcl::io::savePCDFileBinary(DebugDirectory + "First" + to_string(ix) + "_" + std::to_string(iy) + "_" + to_string(First_dop) + "_crop.pcd", *FirstMapCrop); 
-            // pcl::io::savePCDFileBinary(DebugDirectory + "Second" + to_string(ix) + "_" + std::to_string(iy) + "_" + to_string(Second_dop) + "_crop.pcd", *SecondMapCrop); 
         }
     }
     if (ND_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "ND" + ".pcd", *ND_Cloud); 
     if (PD_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "PD" + ".pcd", *PD_Cloud); 
-    // if (FirstUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "FirstUE" + ".pcd", *FirstUE_Cloud); 
-    // if (SecondUE_Cloud->points.size() > 0)  pcl::io::savePCDFileBinary(DebugDirectory + "SecondUE" + ".pcd", *SecondUE_Cloud); 
+
+    // ND 점군 제거: VOXEL_SIZE 해상도 3D 격자 키로 ND_Cloud 셋 구성 후 필터링
+    auto packNDKey = [](int ix, int iy, int iz) -> int64_t {
+        return ((int64_t)(ix & 0x1FFFFF)) |
+               ((int64_t)(iy & 0x1FFFFF) << 21) |
+               ((int64_t)(iz & 0x1FFFFF) << 42);
+    };
+    auto pointToNDKey = [&](const pcl::PointXYZI& pt) -> int64_t {
+        int ix = static_cast<int>(std::floor(pt.x / VOXEL_SIZE));
+        int iy = static_cast<int>(std::floor(pt.y / VOXEL_SIZE));
+        int iz = static_cast<int>(std::floor(pt.z / VOXEL_SIZE));
+        return packNDKey(ix, iy, iz);
+    };
+    std::unordered_set<int64_t> ndVoxels;
+    ndVoxels.reserve(ND_Cloud->points.size());
+    for (const auto& pt : ND_Cloud->points)
+        ndVoxels.insert(pointToNDKey(pt));
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr staticMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
+    staticMapCloud->reserve(optimizedMapCloud->points.size());
+    for (const auto& pt : optimizedMapCloud->points)
+    {
+        if (ndVoxels.count(pointToNDKey(pt)) == 0)
+            staticMapCloud->points.push_back(pt);
+    }
+    staticMapCloud->width = staticMapCloud->points.size();
+    staticMapCloud->height = 1;
+    staticMapCloud->is_dense = false;
+    RCLCPP_INFO(rclcpp::get_logger("long_term_mapping"),
+        "StaticMap: %zu -> %zu points after ND removal",
+        optimizedMapCloud->points.size(), staticMapCloud->points.size());
 
     sensor_msgs::msg::PointCloud2 map_msg;
-    pcl::toROSMsg(*optimizedMapCloud, map_msg);
+    pcl::toROSMsg(*staticMapCloud, map_msg);
     map_msg.header.frame_id = "map";
     PubMerge_map->publish(map_msg);
-    pcl::io::savePCDFileBinary(save_directory + "StaticMap.pcd", *optimizedMapCloud); 
+    pcl::io::savePCDFileBinary(save_directory + "StaticMap.pcd", *staticMapCloud); 
 }
 
 void saveEdges()
