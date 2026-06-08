@@ -54,7 +54,6 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(nano_gicp QUIET)
 find_package(fast_lio REQUIRED)
-find_package(patchworkpp QUIET)
 
 find_package(GTSAM REQUIRED QUIET)
 find_package(Boost REQUIRED COMPONENTS system timer thread serialization chrono)
@@ -86,8 +85,7 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_DIRS}
   ${GTSAM_INCLUDE_DIR}
-  include
-  ${CMAKE_CURRENT_SOURCE_DIR}/../patchwork-plusplus-master/cpp/patchworkpp/include)
+  include)
 
 set(dependencies
   rclcpp
@@ -100,7 +98,6 @@ set(dependencies
   nano_gicp
   pcl_ros
   pcl_conversions  
-  patchworkpp
 )
 
 ament_export_dependencies(rosidl_default_runtime)
@@ -111,9 +108,7 @@ endif()
 
 
 add_executable(LTmapping src/long_term_mapping.cpp
-                  include/solid/solid.cpp
-                  include/CurvedVoxelClustering.cpp
-                  ${CMAKE_CURRENT_SOURCE_DIR}/../patchwork-plusplus-master/cpp/patchworkpp/src/patchworkpp.cpp)
+                  include/solid/solid.cpp)
 
 target_link_libraries(LTmapping
   ${PCL_LIBRARIES}
@@ -139,7 +134,6 @@ ament_target_dependencies(LTmapping
   tf2_geometry_msgs
   nano_gicp
   fast_lio
-  patchworkpp
 )
 
 

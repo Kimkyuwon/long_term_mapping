@@ -56,15 +56,12 @@
 
 #include <nano_gicp/point_type_nano_gicp.hpp>
 #include <nano_gicp/nano_gicp.hpp>
-#include "CurvedVoxelClustering.hpp"
 #include <kiss_matcher/FasterPFH.hpp>
 #include <kiss_matcher/GncSolver.hpp>
 #include <kiss_matcher/KISSMatcher.hpp>
-// #include "patchwork_plusplus/patchworkpp.hpp"
 
 using namespace std;
 using namespace gtsam;
-using CVCHandler = perception::CurvedVoxelClustering<pcl::PointXYZI>;
 
 struct Pose6 {
     double x;
@@ -1076,8 +1073,8 @@ void MapUpdate()
         return ((int64_t)(uint32_t)ix) | ((int64_t)(uint32_t)iy << 32);
     };
     auto pointToKey = [&](const pcl::PointXYZI& pt) -> int64_t {
-        int ix = static_cast<int>(std::floor(pt.x / 1.5 * VOXEL_SIZE));
-        int iy = static_cast<int>(std::floor(pt.y / 1.5 * VOXEL_SIZE));
+        int ix = static_cast<int>(std::floor(pt.x / 1.5));
+        int iy = static_cast<int>(std::floor(pt.y / 1.5));
         return packVoxelKey(ix, iy);
     };
 
