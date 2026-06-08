@@ -65,7 +65,7 @@ main()
  ├── initNoises()           — initialise GTSAM noise models
  ├── getEdges()             — build intra-session odometry factors
  ├── placeRecognition()     — SOLiD-based inter-session loop detection
- ├── getLoopEdges()         — KISS-Matcher global registration (A2_anchor) + NanoGICP loop edges
+ ├── getLoopEdges()         — KISS-Matcher global registration + NanoGICP loop edges
  ├── getPoses()             — add anchor-node prior/loop factors
  ├── runISAM2opt()          — iSAM2 pose-graph optimization + updatePoses()
  ├── generateOptimizedMap() — assemble merged PCD maps
@@ -77,7 +77,7 @@ main()
 
 | Component | Role |
 |---|---|
-| **KISS-Matcher** | Global point cloud registration to compute initial inter-session transform (A2_anchor) |
+| **KISS-Matcher** | Global point cloud registration to compute initial inter-session transform |
 | **SOLiDModule** | Rotation-invariant global descriptor for inter-session loop candidates |
 | **NanoGICP** | Fast generalized ICP for 6-DOF relative pose estimation |
 | **GTSAM iSAM2** | Incremental Bayesian pose-graph optimizer |
@@ -310,9 +310,9 @@ Each session builds its own local map from an arbitrary starting pose, so their 
 1. **Linearization error** — the Jacobian computed at a wrong operating point points in the wrong direction, causing divergence or convergence to a bad local minimum.
 2. **Cauchy kernel saturation** — loop closure edges use a Cauchy robust kernel (parameter = 1.0). When the residual of a loop edge greatly exceeds the Cauchy threshold, the kernel saturates and the edge's effective weight drops to near zero. Even with many correct inter-session loops, the optimizer treats them all as outliers and ignores them.
 
-#### 1-2. Initial inter-session transform via KISS-Matcher (`A2_anchor`)
+#### 1-2. Initial inter-session transform via KISS-Matcher 
 
-Before any keyframe-level loop detection, **KISS-Matcher** registers the two full static maps to compute `A2_anchor` — a 6-DOF rigid body transform that maps Session 2's coordinate frame into Session 1's world frame. This transform serves as the initial estimate for all Session 2 nodes, placing them close enough to their true positions for iSAM2 to converge reliably.
+Before any keyframe-level loop detection, **KISS-Matcher** registers the two full static maps to compute a 6-DOF rigid body transform that maps Session 2's coordinate frame into Session 1's world frame, providing the initial estimate for all Session 2 nodes and placing them close enough to their true positions for iSAM2 to converge reliably.
 
 | Parameter | Description |
 |---|---|
@@ -322,7 +322,7 @@ Before any keyframe-level loop detection, **KISS-Matcher** registers the two ful
 
 #### 1-3. Anchor-node pose-graph optimization
 
-Following the anchor-node formulation [[Kim et al.]](https://ieeexplore.ieee.org/abstract/document/9811916/), Session 1's first node is fixed with near-zero covariance (prior `Δ_C`), while Session 2's first node is initialized from `A2_anchor` with large covariance (prior `Δ_Q`), allowing it to be corrected by inter-session loop factors. iSAM2 then jointly optimizes both sessions' internal drifts and the inter-session relative offset. Cauchy M-estimators on loop factors suppress any remaining false positives.
+Following the anchor-node formulation [[Kim et al.]](https://ieeexplore.ieee.org/abstract/document/9811916/), Session 1's first node is fixed with near-zero covariance prior (`Δ_C`), while Session 2's first node is given a large covariance prior (`Δ_Q`), allowing it to be corrected by inter-session loop factors. iSAM2 then jointly optimizes the intra-session drifts of both sessions and their inter-session alignment. 
 
 ### 2. Inter-session Loop Detection (SOLiD)
 
