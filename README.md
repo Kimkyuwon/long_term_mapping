@@ -139,7 +139,6 @@ Each session directory must follow this structure (compatible with the output of
 |---|---|
 | [nano_gicp](https://github.com/engcang/nano_gicp) | Fast GICP implementation |
 | [SOLiD](https://github.com/sparolab/solid) | Place recognition descriptor |
-| [patchworkpp](https://github.com/url-kaist/patchwork-plusplus) | Ground segmentation (optional, commented out) |
 | [fast_lio2_mapping_and_localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) | LiDAR-Inertial odometry / keyframe producer |
 | [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) | Single-session pose-graph optimization & keyframe export |
 
