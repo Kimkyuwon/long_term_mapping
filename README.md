@@ -355,6 +355,14 @@ UE points are removed from each session's map before the set-difference analysis
 
 ---
 
+## Related Projects
+
+- [FAST-LIO based LiDAR SLAM & Localizaiton](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization): LiDAR-Inertial SLAM package with DOP-based scan matching confidence evaluation, supporting both Mapping and Localization modes
+- [Pose-Graph-Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization): LiDAR-based pose graph optimization backend with loop closure detection and dynamic object removal
+- [SLAM-WebGUI](https://github.com/Kimkyuwon/ROS-SLAM-WebUI): Web-based GUI integrating SLAM, localization, and real-time visualization into a single browser interface — fully compatible with this package for convenient browser-based control
+
+---
+
 ## Acknowledgements
 
 This package integrates or adapts the following open-source works:
