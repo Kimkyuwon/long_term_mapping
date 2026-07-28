@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
-    directory1: /home/kkw/localization_ws/src/long_term_mapping/Campus1
-    directory2: /home/kkw/localization_ws/src/long_term_mapping/Campus2
-    output_directory: Campus_Merge
+    directory1: /home/kkw/localization_ws/src/long_term_mapping/b2_1
+    directory2: /home/kkw/localization_ws/src/long_term_mapping/b2_2
+    output_directory: b2_merge
     dop_thres: 1.25
     fov_d: -15.0
     fov_u: 15.0

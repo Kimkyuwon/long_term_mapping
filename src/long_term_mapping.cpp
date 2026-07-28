@@ -204,7 +204,6 @@ void setParams (std::shared_ptr<rclcpp::Node> nh)
     gicp.setMaximumIterations(3);
     gicp.setTransformationEpsilon(0.01);
     gicp.setEuclideanFitnessEpsilon(0.01);
-    gicp.setRANSACIterations(3);
     gicp.setRANSACOutlierRejectionThreshold(1.0);
 
     loopLine.type = visualization_msgs::msg::Marker::LINE_LIST;
@@ -874,7 +873,19 @@ void getLoopEdges()
     const auto solution = matcher.estimate(src_vec, tgt_vec);
     Eigen::Matrix4d solution_eigen      = Eigen::Matrix4d::Identity();
     solution_eigen.block<3, 3>(0, 0)    = solution.rotation;
-    solution_eigen.topRightCorner(3, 1) = solution.translation;
+    solution_eigen.topRightCorner(3, 1) = solution.translation;    
+    
+    pcl::PointCloud<pcl::PointXYZI>::Ptr MatchedCloud(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::PointCloud<pcl::PointXYZI>::Ptr FirstMatchedCloud(new pcl::PointCloud<pcl::PointXYZI>(*FirstMapCloud));
+    pcl::PointCloud<pcl::PointXYZI>::Ptr SecondMatchedCloud(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::transformPointCloud(*SecondMapCloud, *SecondMatchedCloud, solution_eigen.cast<float>());
+    std::for_each(FirstMatchedCloud->points.begin(), FirstMatchedCloud->points.end(),
+                [](pcl::PointXYZI& point) { point.intensity = 1.0; });
+    std::for_each(SecondMatchedCloud->points.begin(), SecondMatchedCloud->points.end(),
+                [](pcl::PointXYZI& point) { point.intensity = 2.0; });
+    *MatchedCloud += *FirstMatchedCloud;
+    *MatchedCloud += *SecondMatchedCloud;
+    pcl::io::savePCDFileBinary(DebugDirectory + "KissMatchedMap" + ".pcd", *MatchedCloud); 
 
     A2_anchor = gtsam::Pose3(solution_eigen);
 
