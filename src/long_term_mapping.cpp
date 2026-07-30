@@ -60,6 +60,9 @@
 #include <kiss_matcher/GncSolver.hpp>
 #include <kiss_matcher/KISSMatcher.hpp>
 
+#define DOP_VOXEL_SIZE      (2.5)
+#define MEAN_RANGE          (10.0)
+
 using namespace std;
 using namespace gtsam;
 
@@ -318,7 +321,7 @@ double computeDOP(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, Eigen::Vect
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr dop_cloud(new pcl::PointCloud<pcl::PointXYZI>());
     pcl::VoxelGrid<pcl::PointXYZI> downSizeFilterDOP;
-    downSizeFilterDOP.setLeafSize(2, 2, 2);
+    downSizeFilterDOP.setLeafSize(DOP_VOXEL_SIZE, DOP_VOXEL_SIZE, DOP_VOXEL_SIZE);
     downSizeFilterDOP.setInputCloud(cloud);
     downSizeFilterDOP.filter(*dop_cloud);  
     pcl::removeNaNFromPointCloud(*dop_cloud, *dop_cloud, indiceLet);
@@ -352,7 +355,13 @@ double computeDOP(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, Eigen::Vect
     {
         pdop = 100;
     }
-    return pdop;
+    double uz = 0.5 - sin(2*deg2rad(FOV_u))/(4*deg2rad(FOV_u));
+    double g_floor = sqrt(4/(1-uz) + (1/uz));
+    double R_eff_sq = MEAN_RANGE*MEAN_RANGE - blind*blind;
+    double N_typical = 4.0 * M_PI * std::sin(deg2rad(FOV_u)) * R_eff_sq / (DOP_VOXEL_SIZE * DOP_VOXEL_SIZE);
+    double rho = pdop * sqrt(N_typical)/g_floor;
+
+    return rho;
 }
 
 std::optional<gtsam::Pose3> doGICPVirtualRelative( int _loop_kf_idx, int _curr_kf_idx, Eigen::Matrix4f delta_TF)
@@ -405,7 +414,7 @@ std::optional<gtsam::Pose3> doGICPVirtualRelative( int _loop_kf_idx, int _curr_k
     
     double dop_ratio = matching_dop / max_dop;
 
-    if (dop_ratio < dop_thres && matching_dop < 1.0)
+    if (dop_ratio < dop_thres && matching_dop < 1.2)
     {
         Eigen::Matrix3f edge_rot = edge_TF.block(0, 0, 3, 3);
         Eigen::Quaternionf final_q(edge_rot);
@@ -527,7 +536,6 @@ void generateOptimizedMap()
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + ".pcd", *cureKeyframeCloud); // scan data 
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + "_nonground.pcd", *cureNGKeyframeCloud); // scan data 
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + "_ground.pcd", *cureGKeyframeCloud); // scan data 
-        // pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + "_cluster.pcd", *clusterCloud); // scan data
         
         pcl::transformPointCloud(*cureKeyframeCloud, *cureKeyframeCloud, TF);
         pcl::transformPointCloud(*cureNGKeyframeCloud, *cureNGKeyframeCloud, TF);
@@ -572,9 +580,6 @@ void generateOptimizedMap()
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + ".pcd");
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureNGKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + "_nonground.pcd");
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureGKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + "_ground.pcd");
-
-        std::vector<std::vector<int>> clusterIndices;
-
         
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + ".pcd", *cureKeyframeCloud); // scan data 
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + "_nonground.pcd", *cureNGKeyframeCloud); // scan data 
