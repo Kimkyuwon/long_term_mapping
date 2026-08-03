@@ -1,6 +1,7 @@
 # 대용량 포인트클라우드 맵 데이터 (GitHub 100MB 제한 초과)
 Campus1/
 Campus2/
+ELIOS3_map/
 
 # 빌드 산출물
 build/

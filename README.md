@@ -227,7 +227,168 @@ Edit `config/params.yaml` before launching:
     num_exclude_recent: 0                  # Exclude N most-recent frames from search
     num_candidates_from_tree: 20           # Top-K candidates per query
     dop_thres: 1.3                         # DOP ratio rejection threshold
+
+    # ── Void-evidence / persistence (change detection) ─────────────────────
+    persistence.res: 0.2                   # Evidence voxel size [m]
+    persistence.r0: 15.0                   # Range-decay onset for q_dist [m]
+    persistence.r_s: 20.0                  # Range-decay scale for q_dist [m]
+    persistence.d_surf: 0.5                # Grazing-angle weighting band near the surface [m]
+    persistence.aniso_typ: 0.3             # Direction-diversity reference (see below)
+    persistence.eps_reg: 0.001             # (legacy, unused) 3D vDOP regularization
+    persistence.vdop_typ: 1.5              # (legacy, unused) 3D vDOP normalizer
+    persistence.sigma_vdop: 1.0            # (legacy, unused) 3D vDOP falloff
+    persistence.n_req: 3.0                 # Required effective observation mass
+    persistence.w_min: 0.05                # Weight floor
+    persistence.n_sat: 5.0                 # Correlated-observation saturation (see below)
+    persistence.l_hit: 0.85                # Log-odds increment per effective hit
+    persistence.l_void: 0.4                # Log-odds decrement per effective void observation
+    persistence.l_max: 5.0                 # Log-odds clamp (binds once void and hit compete)
+    persistence.tau_del: 0.3               # p < tau_del -> disappeared (ND)
+    persistence.tau_add: 0.7               # p > tau_add -> newly appeared (PD)
+    persistence.cross_dilate: 1            # Neighbor-tolerant cross query radius [voxel], 0 = off
+    persistence.dilate_weight: 0.5         # Attenuation applied to neighbor-inherited evidence
+    persistence.cluster_eps: 0.5           # ND/PD connected-component radius [m]
+    persistence.min_cluster_size: 11       # Drop ND/PD components smaller than this, <=1 = off
 ```
+
+#### Direction diversity: `aniso_typ`
+
+Void evidence for a voxel is accumulated as `M = Σ qᵢ·uᵢuᵢᵀ` over the ray directions `uᵢ` that
+passed through it. A ground robot drives along a planar path, so the rays reaching a given voxel
+lie almost entirely in one plane and the smallest eigenvalue `λ₃` is physically always near zero.
+Any metric that depends on `λ₃` — including the 3D vDOP formerly used here — therefore carries no
+information and saturates on its regularizer.
+
+Direction diversity is instead measured inside the observable plane, as the spread of `λ₂` relative
+to `λ₁` on the trace-normalized matrix:
+
+```
+aniso  = λ₂ / λ₁            (0 = rays along a single line, 1 = isotropic within the plane)
+w_geom = clamp(aniso / aniso_typ, 0, 1)
+```
+
+For rays spread uniformly over a half-fan of `±θ` in the plane, `aniso = (1-s)/(1+s)` with
+`s = sin(2θ)/(2θ)`, so `aniso_typ` has a direct geometric reading: `0.2 → ±42.9°`,
+`0.3 → ±51.7°`, `0.5 → ±65.3°` earns full weight. The default `0.3` is a **provisional value
+derived from this geometry, not from measured data**; re-tune it against the
+`aniso histogram (lambda_2/lambda_1)` diagnostic printed at run time. `eps_reg`, `vdop_typ` and
+`sigma_vdop` are kept only so the legacy vDOP can still be logged alongside the new metric for
+comparison.
+
+#### Evidence competition and `n_sat`
+
+`SEEN_FREE` and `REFLECTION` are independent UFOMap layers, so a single voxel can be observed both
+as free space and as occupied by the opposite session. Both observations are accumulated into the
+same log-odds value and allowed to compete; a voxel is labelled unexplored (UE) only when neither
+kind of evidence exists:
+
+```
+# pers_1 — "the session-1 structure is still there"
+if (n_hit  > 0)  log_odds += l_hit  * effectiveCount(n_hit,  n_sat)
+if (is_void)     log_odds -= w_v * l_void * effectiveCount(n_void, n_sat)
+
+# pers_2 — "the session-2 structure is new"   (exact sign mirror of pers_1)
+if (n_hit  > 0)  log_odds -= l_hit  * effectiveCount(n_hit,  n_sat)
+if (is_void)     log_odds += w_v * l_void * effectiveCount(n_void, n_sat)
+
+log_odds = clamp(log_odds, ±l_max)
+UE  <=>  !(n_hit > 0) && !is_void      # and no neighbor evidence, see cross_dilate below
+```
+
+Void evidence carries the same coefficient `l_void` in both directions, at the center query and on
+the neighbor-inherited path alike, so ND and PD sit at the same effective threshold: a pure-void
+voxel needs `w_v > |logit(tau)| / (l_void · n_sat) = 0.4236` in either direction. The `PD
+coefficient` log line prints both thresholds and flags them if they ever diverge.
+
+Repeated observations of one voxel across consecutive keyframes are strongly correlated, so counting
+them linearly overstates the evidence by an order of magnitude (a slowly traversed corridor yields
+`n_keyframes` in the tens). `effectiveCount` converts a raw count into an effective number of
+independent observations:
+
+```
+effectiveCount(n, n_sat) = n_sat · (1 − exp(−n / n_sat))     # → n as n→0, → n_sat as n→∞
+```
+
+`n_sat` therefore caps the magnitude of either evidence type and sets the decision threshold
+directly. For a pure-void voxel, ND requires `w_v · l_void · n_sat > |logit(tau_del)| = 0.8473`; at
+`n_sat = 5` and `l_void = 0.4` this becomes `w_v > 0.424`, which is what puts the void weight `w_v`
+back in control of the decision. Lower `n_sat` makes the detector more conservative (fewer ND/PD),
+higher `n_sat` more aggressive. Tune it against the `ND/PD yield`, `Decision margin` and
+`Void voxel w_v distribution` diagnostics printed at run time.
+
+#### Neighbor-tolerant cross query: `cross_dilate`, `dilate_weight`
+
+The two session maps are voxel-downsampled at `voxel_size` (0.4 m) before classification, while the
+decision grid runs at `persistence.res` (0.2 m), and map insertion adds a one-voxel unknown shell
+around every surface (`inflate_unknown = 1`). All three effects share the same scale, so two
+sessions that observed the *same* physical surface can land in adjacent cells of the decision grid.
+A voxel that finds neither hit nor free evidence at its own coordinate is then reported as UE even
+though the opposite session did observe the surface — measurement showed 40–48 % of all UE voxels
+have a hit in their 26-neighborhood.
+
+When the center query finds nothing and `cross_dilate > 0`, the query is widened to the
+`(2·cross_dilate+1)³ − 1` neighborhood and the state is inherited from there:
+
+```
+center miss  ->  probe neighbors within cross_dilate
+   any neighbor with hits > 0   ->  inherit hit evidence  (max hits over the neighborhood)
+   else any neighbor seenFree   ->  inherit void evidence (n_void from the *center* voxel entry)
+   else                         ->  still UE
+inherited term is multiplied by dilate_weight
+```
+
+Three invariants hold by construction:
+
+* **Center first.** The neighborhood is probed only when the center yielded no evidence at all, so
+  every voxel that was decided before is decided identically now.
+* **Hit first.** Hit evidence outranks free evidence, matching the observation that misalignment
+  pushes surfaces sideways far more often than it opens free space (`adj_free_only` is ~0.3 % of UE).
+* **Attenuation.** Inherited evidence is positional inference, not observation, so `dilate_weight`
+  keeps it strictly weaker than a center observation.
+
+`cross_dilate: 0` disables the feature and reproduces the center-only behaviour bit-for-bit, which
+makes it the A/B baseline. UE voxels are still never removed from the composed final map. Tune
+against `Dilate resolution`, `UE reduction`, `Dilated evidence outcome` and
+`UE 26-neighbor state (after dilate)`.
+
+#### Connected-component post-filter: `cluster_eps`, `min_cluster_size`
+
+Residual registration error between the two sessions produces "shell" false positives: a thin,
+misaligned copy of a surface the *opposite* session also observed. Genuine change occupies space
+the opposite session left empty, so the two are separable by how far a detection sits from the
+opposite session's point cloud — and that distance grows with cluster size. Measured on the current
+dataset (ND 12301 pts, PD 11283 pts):
+
+| component size | ND median dist. to SecondMap | PD median dist. to FirstMap |
+|---|---|---|
+| 1 | 0.175 m | 0.135 m |
+| 2–10 | 0.167–0.220 m | 0.098–0.126 m |
+| 11–30 | 0.444 m | 0.110 m |
+| 31–100 | 0.547 m | 0.277 m |
+| 101–300 | 0.578 m | 0.408 m |
+
+89 % of single-point ND detections lie within 0.5 m of a session-2 surface; the separation jumps at
+11 points. After `classifyChanges()` and **before** the debug PCDs are written and
+`composeFinalMap()` runs, connected components of the ND and PD clouds are computed at radius
+`cluster_eps` and components smaller than `min_cluster_size` are dropped, so `ND.pcd`, `PD.pcd` and
+`StaticMap.pcd` all reflect the same decision.
+
+`cluster_eps` is governed by the actual point spacing, not by `persistence.res`: the input maps are
+downsampled at `voxel_size` (0.4 m), giving a nearest-neighbour distance of 0.27 m (median) and
+0.38 m (p75). A radius of 0.35 m severs more than a quarter of the legitimate neighbour links and
+shatters real objects (the largest ND component collapses from 654 to 81 points), so 0.5 m is the
+correct connection radius here. Re-derive it from the point spacing if `voxel_size` changes.
+
+Survival is decided per voxel, not per point — if any point of a voxel belongs to a surviving
+component the whole voxel and all of its points are kept — which preserves the invariant that the
+cloud contains exactly the points of the voxel set. `composeFinalMap()` reads only `nd_voxels` and
+the debug PCD is written from `nd_cloud`, so the two must never disagree.
+
+`min_cluster_size: 1` (or 0) disables filtering entirely and reproduces the previous behaviour
+bit-for-bit — the cluster statistics are still computed and logged, but neither the voxel sets nor
+the clouds are touched. UE sets are never filtered. Tune against `Cluster size histogram` and
+`Cluster filter`; lower the threshold toward 6 if small real objects (posts, signs, pedestrians) are
+being lost, raise it toward 31 if shell-shaped detections survive.
 
 ---
 
