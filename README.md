@@ -4,7 +4,10 @@
 
 > A ROS2 C++ package that merges independently-acquired LiDAR sessions, detects structural changes between sessions, and produces a unified map with positive/negative change maps. The implementation is inspired by the concepts in the [LT-mapper paper](https://ieeexplore.ieee.org/abstract/document/9811916/) and re-implemented from scratch for ROS2 Jazzy.
 
-![map](doc/map.png)
+| Before (single-session maps) | After (merged & change-detected) |
+|---|---|
+| ![before](doc/before.png) | ![after](doc/after.png) |
+
 ---
 
 ## Table of Contents
@@ -206,24 +209,24 @@ Edit `config/params.yaml` before launching:
     directory1: /path/to/session1          # Central (reference) session
     directory2: /path/to/session2          # Query (new) session
     output_directory: output               # Relative to package root
-    blind: 1.0                             # Ignore returns within this radius [m]
+    blind: 2.0                             # Ignore returns within this radius [m]
 
     # ── KISS-Matcher (inter-session global registration) ───────────────────
     anchor_resolution: 2.0                 # Voxel resolution for KISS-Matcher [m]
 
     # ── SOLiD place recognition & pose-graph ───────────────────────────────
     r_solid_thres: 0.95                    # SOLiD similarity threshold (↑ = stricter)
-    fov_u:  15.0                           # LiDAR vertical FoV upper bound [deg]
-    fov_d: -15.0                           # LiDAR vertical FoV lower bound [deg]
+    fov_u:  22.5                           # LiDAR vertical FoV upper bound [deg]
+    fov_d: -22.5                           # LiDAR vertical FoV lower bound [deg]
     num_angle: 120                         # SOLiD azimuth bins
-    num_range: 100                         # SOLiD range bins
-    num_height: 16                         # SOLiD height bins
+    num_range: 50                          # SOLiD range bins
+    num_height: 32                         # SOLiD height bins
     min_distance: 1                        # Minimum descriptor search range [m]
-    max_distance: 100                      # Maximum descriptor search range [m]
+    max_distance: 50                       # Maximum descriptor search range [m]
     voxel_size: 0.4                        # Voxel leaf size for maps [m]
     num_exclude_recent: 0                  # Exclude N most-recent frames from search
     num_candidates_from_tree: 20           # Top-K candidates per query
-    dop_thres: 1.1                         # DOP ratio rejection threshold
+    dop_thres: 1.3                         # DOP ratio rejection threshold
 ```
 
 ---
@@ -290,6 +293,7 @@ All outputs are written to `<package_root>/<output_directory>/`:
 │   ├── 0.pcd, 0_ground.pcd, 0_nonground.pcd
 │   └── ...
 └── Debug/
+    ├── KissMatchedMap.pcd    ← Session 1 + 2 maps aligned by KISS-Matcher (intensity-coded per session)
     ├── ND.pcd                ← Negative-difference (disappeared) points
     ├── PD.pcd                ← Positive-difference (appeared) points
     ├── FirstUE.pcd           ← Session 1 unexplored area (UE) points
@@ -319,6 +323,8 @@ Before any keyframe-level loop detection, **KISS-Matcher** registers the two ful
 |---|---|
 | `anchor_resolution` | Voxel downsampling resolution for KISS-Matcher [m]. Larger values are faster but less accurate. Typical range: 1.0–3.0 m |
 
+The two maps, aligned by the resulting transform and colour-coded by session (intensity `1` = Session 1, `2` = Session 2), are saved to `Debug/KissMatchedMap.pcd` so the global registration quality can be inspected before pose-graph optimization runs.
+
 > `StaticMap.pcd` must be the static-only point cloud map (dynamic objects removed), compatible with the output of [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization).
 
 #### 1-3. Anchor-node pose-graph optimization
@@ -331,13 +337,23 @@ SOLiD (Spatial Overlap with LiDAR Descriptor) builds a rotation-invariant 3D his
 
 ### 3. Scan Matching with DOP Rejection
 
-Candidate pairs are refined with NanoGICP. To reject geometrically degenerate matches (e.g., long corridors), a **Dilution of Precision (DOP)** metric is computed from the matched point distribution. The DOP ratio
+Candidate pairs are refined with NanoGICP. To reject geometrically degenerate matches (e.g., long corridors), a **Dilution of Precision (DOP)** metric is computed from the matched point distribution.
+
+`computeDOP()` first voxelizes the point cloud (leaf size `DOP_VOXEL_SIZE = 2.5 m`) and computes the raw PDOP from the unit line-of-sight vectors between each remaining point and the query position, mirroring GNSS-style geometric dilution of precision. This raw value is then normalized into a score `rho`:
+
+```
+rho = pdop * sqrt(N_typical) / g_floor
+```
+
+where `N_typical` is the expected point count of a well-constrained scan derived from the configured vertical FoV (`fov_u`/`fov_d`) and a nominal sensing range (`MEAN_RANGE = 10 m`), and `g_floor` is a FoV-dependent geometric floor factor. Normalizing this way keeps the score comparable across sessions with different point densities or sensor FoVs.
+
+The DOP ratio
 
 ```
 DOP_ratio = matching_DOP / max(curr_DOP, target_DOP)
 ```
 
-must fall below `dop_thres`; matches with a high DOP ratio indicate insufficient geometric constraint and are discarded.
+must fall below `dop_thres`, and the normalized `matching_DOP` itself must stay below an absolute cap (`1.2`); matches failing either check indicate insufficient geometric constraint and are discarded.
 
 ### 4. Tile-based Change Detection
 
