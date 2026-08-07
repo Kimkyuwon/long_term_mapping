@@ -4,9 +4,11 @@
 
 > A ROS2 C++ package that merges independently-acquired LiDAR sessions, detects structural changes between sessions, and produces a unified map with positive/negative change maps. The implementation is inspired by the concepts in the [LT-mapper paper](https://ieeexplore.ieee.org/abstract/document/9811916/) and re-implemented from scratch for ROS2 Jazzy.
 
+
 | Before (single-session maps) | After (merged & change-detected) |
-|---|---|
-| ![before](doc/before.png) | ![after](doc/after.png) |
+| ---------------------------- | -------------------------------- |
+| before                       | after                            |
+
 
 ---
 
@@ -28,6 +30,8 @@
 
 ---
 
+
+
 ## Overview
 
 `long_term_mapping` takes two independently-recorded LiDAR sessions (each with its own pose-graph and keyframe scans) and performs:
@@ -35,11 +39,11 @@
 1. **Inter-session place recognition** using [SOLiD](https://github.com/sparolab/solid) descriptors
 2. **Multi-session pose-graph optimization** via GTSAM iSAM2 with anchor-node-based loop factors
 3. **Geometric scan matching** using NanoGICP with DOP (Dilution of Precision)-based outlier rejection
-4. **Map change detection** — tile-based set-difference analysis identifying:
-   - **ND (Negative Difference)**: points that disappeared between sessions
-   - **PD (Positive Difference)**: newly appearing structures
-5. **Curved Voxel Clustering** for dynamic object segmentation from the change maps
-6. **Unified map export** — merged point cloud, per-session PD/ND maps, and updated pose files
+4. **Void-evidence change detection** (UFOMap + log-odds) on non-ground structure points:
+  - **ND (Negative Difference)**: non-ground structure that disappeared
+  - **PD (Positive Difference)**: newly appearing non-ground structure
+   - **UE (Unexplored)**: full-map voxels with no opposite-session void/hit evidence
+5. **Unified map export** — `StaticMap.pcd`, debug ND/PD/UE clouds, and updated pose files
 
 ```
 Session 1 (directory1/)          Session 2 (directory2/)
@@ -59,35 +63,47 @@ Session 1 (directory1/)          Session 2 (directory2/)
 
 ---
 
+
+
 ## System Architecture
 
 ```
 main()
  ├── setParams()            — load YAML parameters
- ├── getDirectory()         — resolve I/O paths
- ├── loadFiles()            — read poses & edges from both sessions
- ├── initNoises()           — initialise GTSAM noise models
- ├── getEdges()             — build intra-session odometry factors
- ├── placeRecognition()     — SOLiD-based inter-session loop detection
- ├── getLoopEdges()         — KISS-Matcher global registration + NanoGICP loop edges
- ├── getPoses()             — add anchor-node prior/loop factors
- ├── runISAM2opt()          — iSAM2 pose-graph optimization + updatePoses()
- ├── generateOptimizedMap() — assemble merged PCD maps
- ├── MapUpdate()            — tile-based ND/PD change detection
+├── getDirectory()         — resolve I/O paths
+├── loadFiles()            — read poses & edges from both sessions
+├── initNoises()           — initialise GTSAM noise models
+├── getEdges()             — build intra-session odometry factors
+├── placeRecognition()     — SOLiD-based inter-session loop detection
+├── getLoopEdges()         — KISS-Matcher global registration + NanoGICP loop edges
+├── getPoses()             — add anchor-node prior/loop factors
+├── runISAM2opt()          — iSAM2 pose-graph optimization + updatePoses()
+├── generateOptimizedMap() — assemble First/Second + Ground/NonGround maps
+├── MapUpdate()            — void-evidence ND/PD/UE + StaticMap
  └── saveEdges()            — write merged edge file
 ```
 
+`MapUpdate()` is a thin orchestrator in `src/long_term_mapping.cpp`. The change-detection
+pipeline lives in `src/voxel_evidence.cpp` (`lt_mapping::buildVoidMap`,
+`lt_mapping::detectAndCompose`).
+
 ### Key Components
 
-| Component | Role |
-|---|---|
-| **KISS-Matcher** | Global point cloud registration to compute initial inter-session transform |
-| **SOLiDModule** | Rotation-invariant global descriptor for inter-session loop candidates |
-| **NanoGICP** | Fast generalized ICP for 6-DOF relative pose estimation |
-| **GTSAM iSAM2** | Incremental Bayesian pose-graph optimizer |
-| **DOP filter** | Dilution-of-Precision metric to reject geometrically degenerate loop/change detections |
+
+| Component                        | Role                                                                         |
+| -------------------------------- | ---------------------------------------------------------------------------- |
+| **KISS-Matcher**                 | Global point cloud registration to compute initial inter-session transform   |
+| **SOLiDModule**                  | Rotation-invariant global descriptor for inter-session loop candidates       |
+| **NanoGICP**                     | Fast generalized ICP for 6-DOF relative pose estimation                      |
+| **GTSAM iSAM2**                  | Incremental Bayesian pose-graph optimizer                                    |
+| **DOP filter**                   | Dilution-of-Precision metric to reject geometrically degenerate loop matches |
+| **UFOMap** (`thirdparty/ufomap`) | Per-session void/hit maps (`SEEN_FREE | REFLECTION`)                         |
+| **voxel_evidence**               | Ray evidence, log-odds classify, StaticMap compose                           |
+
 
 ---
+
+
 
 ## Input Data Format
 
@@ -108,45 +124,68 @@ Each session directory must follow this structure (compatible with the output of
                                from_idx to_idx tx ty tz roll pitch yaw σ0…σ5
 ```
 
-**`optimized_poses.txt` line format:**
+`optimized_poses.txt` **line format:**
+
 ```
 <timestamp> <x> <y> <z> <qx> <qy> <qz> <qw>
 ```
 
-**`edges.txt` line format:**
+`edges.txt` **line format:**
+
 ```
 <from_idx> <to_idx> <tx> <ty> <tz> <roll> <pitch> <yaw> <σ0> <σ1> <σ2> <σ3> <σ4> <σ5>
 ```
 
 ---
 
+
+
 ## Dependencies
 
+
+
 ### System Libraries
-| Library | Purpose | Install |
-|---|---|---|
-| [PCL](https://pointclouds.org/) ≥ 1.12 | Point cloud processing | `sudo apt install libpcl-dev` |
-| [Eigen3](https://eigen.tuxfamily.org/) ≥ 3.4 | Linear algebra | `sudo apt install libeigen3-dev` |
-| [GTSAM](https://gtsam.org/) ≥ 4.1 | Pose-graph optimization | see below |
-| OpenMP | Parallelization | `sudo apt install libomp-dev` |
-| [flann](https://github.com/flann-lib/flann) | Approximate nearest neighbours (KISS-Matcher) | `sudo apt install libflann-dev` |
-| [lz4](https://github.com/lz4/lz4) | Compression (KISS-Matcher) | `sudo apt install liblz4-dev` |
-| [oneTBB](https://github.com/oneapi-src/oneTBB) | Parallelism (KISS-Matcher) | `sudo apt install libtbb-dev` |
+
+
+| Library                                        | Purpose                                       | Install                          |
+| ---------------------------------------------- | --------------------------------------------- | -------------------------------- |
+| [PCL](https://pointclouds.org/) ≥ 1.12         | Point cloud processing                        | `sudo apt install libpcl-dev`    |
+| [Eigen3](https://eigen.tuxfamily.org/) ≥ 3.4   | Linear algebra                                | `sudo apt install libeigen3-dev` |
+| [GTSAM](https://gtsam.org/) ≥ 4.1              | Pose-graph optimization                       | see below                        |
+| OpenMP                                         | Parallelization                               | `sudo apt install libomp-dev`    |
+| [flann](https://github.com/flann-lib/flann)    | Approximate nearest neighbours (KISS-Matcher) | `sudo apt install libflann-dev`  |
+| [lz4](https://github.com/lz4/lz4)              | Compression (KISS-Matcher)                    | `sudo apt install liblz4-dev`    |
+| [oneTBB](https://github.com/oneapi-src/oneTBB) | Parallelism (KISS-Matcher)                    | `sudo apt install libtbb-dev`    |
+
+
+
 
 ### Bundled Third-party Libraries (no separate install)
-| Library | Purpose | Notes |
-|---|---|---|
-| [KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher) | Global point cloud registration | Source bundled in `include/kiss_matcher/` |
+
+
+| Library                                                   | Purpose                                       | Notes                                     |
+| --------------------------------------------------------- | --------------------------------------------- | ----------------------------------------- |
+| [KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher) | Global point cloud registration               | Source bundled in `include/kiss_matcher/` |
+| [UFOMap](https://github.com/UnknownFreeOccupied/ufomap)   | Void/hit volumetric maps for change detection | Source bundled in `thirdparty/ufomap/`    |
+
+
+
 
 ### Third-party ROS2 Packages (source build)
-| Package | Notes |
-|---|---|
-| [nano_gicp](https://github.com/engcang/nano_gicp) | Fast GICP implementation |
-| [SOLiD](https://github.com/sparolab/solid) | Place recognition descriptor |
-| [fast_lio2_mapping_and_localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) | LiDAR-Inertial odometry / keyframe producer |
-| [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) | Single-session pose-graph optimization & keyframe export |
+
+
+| Package                                                                                               | Notes                                                    |
+| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| [nano_gicp](https://github.com/engcang/nano_gicp)                                                     | Fast GICP implementation                                 |
+| [SOLiD](https://github.com/sparolab/solid)                                                            | Place recognition descriptor                             |
+| [fast_lio2_mapping_and_localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) | LiDAR-Inertial odometry / keyframe producer              |
+| [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)                       | Single-session pose-graph optimization & keyframe export |
+
+
+
 
 ### GTSAM Installation
+
 ```bash
 sudo add-apt-repository ppa:borglab/gtsam-release-4.1
 sudo apt update
@@ -155,7 +194,11 @@ sudo apt install libgtsam-dev libgtsam-unstable-dev
 
 ---
 
+
+
 ## Build
+
+
 
 ### 1. Install system dependencies
 
@@ -171,6 +214,8 @@ sudo add-apt-repository ppa:borglab/gtsam-release-4.1
 sudo apt update
 sudo apt install libgtsam-dev libgtsam-unstable-dev
 ```
+
+
 
 ### 2. Clone and build
 
@@ -197,6 +242,8 @@ source install/setup.bash
 > ROBIN is fetched automatically by CMake on the first build and cached for subsequent builds.
 
 ---
+
+
 
 ## Configuration
 
@@ -229,176 +276,75 @@ Edit `config/params.yaml` before launching:
     dop_thres: 1.3                         # DOP ratio rejection threshold
 
     # ── Void-evidence / persistence (change detection) ─────────────────────
-    persistence.res: 0.2                   # Evidence voxel size [m]
-    persistence.r0: 15.0                   # Range-decay onset for q_dist [m]
-    persistence.r_s: 20.0                  # Range-decay scale for q_dist [m]
-    persistence.d_surf: 0.5                # Grazing-angle weighting band near the surface [m]
-    persistence.aniso_typ: 0.3             # Direction-diversity reference (see below)
-    persistence.eps_reg: 0.001             # (legacy, unused) 3D vDOP regularization
-    persistence.vdop_typ: 1.5              # (legacy, unused) 3D vDOP normalizer
-    persistence.sigma_vdop: 1.0            # (legacy, unused) 3D vDOP falloff
-    persistence.n_req: 3.0                 # Required effective observation mass
-    persistence.w_min: 0.05                # Weight floor
-    persistence.n_sat: 5.0                 # Correlated-observation saturation (see below)
-    persistence.l_hit: 0.85                # Log-odds increment per effective hit
-    persistence.l_void: 0.4                # Log-odds decrement per effective void observation
-    persistence.l_max: 5.0                 # Log-odds clamp (binds once void and hit compete)
-    persistence.tau_del: 0.3               # p < tau_del -> disappeared (ND)
-    persistence.tau_add: 0.7               # p > tau_add -> newly appeared (PD)
-    persistence.cross_dilate: 1            # Neighbor-tolerant cross query radius [voxel], 0 = off
-    persistence.dilate_weight: 0.5         # Attenuation applied to neighbor-inherited evidence
-    persistence.cluster_eps: 0.5           # ND/PD connected-component radius [m]
-    persistence.min_cluster_size: 11       # Drop ND/PD components smaller than this, <=1 = off
+    persistence.res: 0.2                   # Evidence / decision voxel size [m]
 ```
 
-#### Direction diversity: `aniso_typ`
+Other persistence knobs (`r0`, `r_s`, `d_surf`, `aniso_typ`, `n_req`, `w_min`, `n_sat`,
+`l_hit`, `l_void`, `l_max`, `tau_del`, `tau_add`, `cross_dilate`, `dilate_weight`) live as
+defaults in `EvidenceParams` (`include/voxel_evidence.hpp`). Only `persistence.res` is exposed
+as a ROS parameter.
 
-Void evidence for a voxel is accumulated as `M = Σ qᵢ·uᵢuᵢᵀ` over the ray directions `uᵢ` that
-passed through it. A ground robot drives along a planar path, so the rays reaching a given voxel
-lie almost entirely in one plane and the smallest eigenvalue `λ₃` is physically always near zero.
-Any metric that depends on `λ₃` — including the 3D vDOP formerly used here — therefore carries no
-information and saturates on its regularizer.
+PD/ND are classified on `First/SecondNonGroundMap.pcd`. UE is classified on the full
+`First/SecondMap.pcd`. Void maps still use full keyframe scans. `StaticMap` is composed from
+the full maps so ground is retained (ND keys come only from non-ground).
 
-Direction diversity is instead measured inside the observable plane, as the spread of `λ₂` relative
-to `λ₁` on the trace-normalized matrix:
+#### Direction diversity
+
+Void evidence accumulates `M = Σ qᵢ·uᵢuᵢᵀ`. Ground robots observe rays in a near-planar fan, so
+`λ₃ ≈ 0` and 3D vDOP is uninformative. Direction diversity uses the in-plane spread:
 
 ```
-aniso  = λ₂ / λ₁            (0 = rays along a single line, 1 = isotropic within the plane)
+aniso  = λ₂ / λ₁
 w_geom = clamp(aniso / aniso_typ, 0, 1)
+w_v    = clamp(w_geom * min(1, q_sum / n_req), w_min, 1)
 ```
 
-For rays spread uniformly over a half-fan of `±θ` in the plane, `aniso = (1-s)/(1+s)` with
-`s = sin(2θ)/(2θ)`, so `aniso_typ` has a direct geometric reading: `0.2 → ±42.9°`,
-`0.3 → ±51.7°`, `0.5 → ±65.3°` earns full weight. The default `0.3` is a **provisional value
-derived from this geometry, not from measured data**; re-tune it against the
-`aniso histogram (lambda_2/lambda_1)` diagnostic printed at run time. `eps_reg`, `vdop_typ` and
-`sigma_vdop` are kept only so the legacy vDOP can still be logged alongside the new metric for
-comparison.
+
 
 #### Evidence competition and `n_sat`
 
-`SEEN_FREE` and `REFLECTION` are independent UFOMap layers, so a single voxel can be observed both
-as free space and as occupied by the opposite session. Both observations are accumulated into the
-same log-odds value and allowed to compete; a voxel is labelled unexplored (UE) only when neither
-kind of evidence exists:
+`SEEN_FREE` and `REFLECTION` can both be true for one voxel; both contribute to the same log-odds:
 
 ```
-# pers_1 — "the session-1 structure is still there"
+# pers_1 — session-1 structure still present
 if (n_hit  > 0)  log_odds += l_hit  * effectiveCount(n_hit,  n_sat)
 if (is_void)     log_odds -= w_v * l_void * effectiveCount(n_void, n_sat)
 
-# pers_2 — "the session-2 structure is new"   (exact sign mirror of pers_1)
+# pers_2 — session-2 structure is new  (sign mirror)
 if (n_hit  > 0)  log_odds -= l_hit  * effectiveCount(n_hit,  n_sat)
 if (is_void)     log_odds += w_v * l_void * effectiveCount(n_void, n_sat)
 
 log_odds = clamp(log_odds, ±l_max)
-UE  <=>  !(n_hit > 0) && !is_void      # and no neighbor evidence, see cross_dilate below
+UE  <=>  no center evidence and no neighbor-inherited evidence
 ```
 
-Void evidence carries the same coefficient `l_void` in both directions, at the center query and on
-the neighbor-inherited path alike, so ND and PD sit at the same effective threshold: a pure-void
-voxel needs `w_v > |logit(tau)| / (l_void · n_sat) = 0.4236` in either direction. The `PD
-coefficient` log line prints both thresholds and flags them if they ever diverge.
-
-Repeated observations of one voxel across consecutive keyframes are strongly correlated, so counting
-them linearly overstates the evidence by an order of magnitude (a slowly traversed corridor yields
-`n_keyframes` in the tens). `effectiveCount` converts a raw count into an effective number of
-independent observations:
-
 ```
-effectiveCount(n, n_sat) = n_sat · (1 − exp(−n / n_sat))     # → n as n→0, → n_sat as n→∞
+effectiveCount(n, n_sat) = n_sat · (1 − exp(−n / n_sat))
 ```
 
-`n_sat` therefore caps the magnitude of either evidence type and sets the decision threshold
-directly. For a pure-void voxel, ND requires `w_v · l_void · n_sat > |logit(tau_del)| = 0.8473`; at
-`n_sat = 5` and `l_void = 0.4` this becomes `w_v > 0.424`, which is what puts the void weight `w_v`
-back in control of the decision. Lower `n_sat` makes the detector more conservative (fewer ND/PD),
-higher `n_sat` more aggressive. Tune it against the `ND/PD yield`, `Decision margin` and
-`Void voxel w_v distribution` diagnostics printed at run time.
 
-#### Neighbor-tolerant cross query: `cross_dilate`, `dilate_weight`
 
-The two session maps are voxel-downsampled at `voxel_size` (0.4 m) before classification, while the
-decision grid runs at `persistence.res` (0.2 m), and map insertion adds a one-voxel unknown shell
-around every surface (`inflate_unknown = 1`). All three effects share the same scale, so two
-sessions that observed the *same* physical surface can land in adjacent cells of the decision grid.
-A voxel that finds neither hit nor free evidence at its own coordinate is then reported as UE even
-though the opposite session did observe the surface — measurement showed 40–48 % of all UE voxels
-have a hit in their 26-neighborhood.
+#### Neighbor-tolerant cross query
 
-When the center query finds nothing and `cross_dilate > 0`, the query is widened to the
-`(2·cross_dilate+1)³ − 1` neighborhood and the state is inherited from there:
-
-```
-center miss  ->  probe neighbors within cross_dilate
-   any neighbor with hits > 0   ->  inherit hit evidence  (max hits over the neighborhood)
-   else any neighbor seenFree   ->  inherit void evidence (n_void from the *center* voxel entry)
-   else                         ->  still UE
-inherited term is multiplied by dilate_weight
-```
-
-Three invariants hold by construction:
-
-* **Center first.** The neighborhood is probed only when the center yielded no evidence at all, so
-  every voxel that was decided before is decided identically now.
-* **Hit first.** Hit evidence outranks free evidence, matching the observation that misalignment
-  pushes surfaces sideways far more often than it opens free space (`adj_free_only` is ~0.3 % of UE).
-* **Attenuation.** Inherited evidence is positional inference, not observation, so `dilate_weight`
-  keeps it strictly weaker than a center observation.
-
-`cross_dilate: 0` disables the feature and reproduces the center-only behaviour bit-for-bit, which
-makes it the A/B baseline. UE voxels are still never removed from the composed final map. Tune
-against `Dilate resolution`, `UE reduction`, `Dilated evidence outcome` and
-`UE 26-neighbor state (after dilate)`.
-
-#### Connected-component post-filter: `cluster_eps`, `min_cluster_size`
-
-Residual registration error between the two sessions produces "shell" false positives: a thin,
-misaligned copy of a surface the *opposite* session also observed. Genuine change occupies space
-the opposite session left empty, so the two are separable by how far a detection sits from the
-opposite session's point cloud — and that distance grows with cluster size. Measured on the current
-dataset (ND 12301 pts, PD 11283 pts):
-
-| component size | ND median dist. to SecondMap | PD median dist. to FirstMap |
-|---|---|---|
-| 1 | 0.175 m | 0.135 m |
-| 2–10 | 0.167–0.220 m | 0.098–0.126 m |
-| 11–30 | 0.444 m | 0.110 m |
-| 31–100 | 0.547 m | 0.277 m |
-| 101–300 | 0.578 m | 0.408 m |
-
-89 % of single-point ND detections lie within 0.5 m of a session-2 surface; the separation jumps at
-11 points. After `classifyChanges()` and **before** the debug PCDs are written and
-`composeFinalMap()` runs, connected components of the ND and PD clouds are computed at radius
-`cluster_eps` and components smaller than `min_cluster_size` are dropped, so `ND.pcd`, `PD.pcd` and
-`StaticMap.pcd` all reflect the same decision.
-
-`cluster_eps` is governed by the actual point spacing, not by `persistence.res`: the input maps are
-downsampled at `voxel_size` (0.4 m), giving a nearest-neighbour distance of 0.27 m (median) and
-0.38 m (p75). A radius of 0.35 m severs more than a quarter of the legitimate neighbour links and
-shatters real objects (the largest ND component collapses from 654 to 81 points), so 0.5 m is the
-correct connection radius here. Re-derive it from the point spacing if `voxel_size` changes.
-
-Survival is decided per voxel, not per point — if any point of a voxel belongs to a surviving
-component the whole voxel and all of its points are kept — which preserves the invariant that the
-cloud contains exactly the points of the voxel set. `composeFinalMap()` reads only `nd_voxels` and
-the debug PCD is written from `nd_cloud`, so the two must never disagree.
-
-`min_cluster_size: 1` (or 0) disables filtering entirely and reproduces the previous behaviour
-bit-for-bit — the cluster statistics are still computed and logged, but neither the voxel sets nor
-the clouds are touched. UE sets are never filtered. Tune against `Cluster size histogram` and
-`Cluster filter`; lower the threshold toward 6 if small real objects (posts, signs, pedestrians) are
-being lost, raise it toward 31 if shell-shaped detections survive.
+When the center cell has neither hit nor free evidence and `cross_dilate > 0`, the query widens to
+the neighborhood. Hit evidence outranks free; inherited terms are scaled by `dilate_weight`.
+`cross_dilate: 0` disables this (center-only). UE voxels are never dropped from the final map.
 
 ---
 
+
+
 ## Running
 
-### Launch 
+
+
+### Launch
 
 ```bash
 ros2 launch long_term_mapping lt_mapper.launch.py 
 ```
+
+
 
 ### Expected Console Output
 
@@ -420,21 +366,27 @@ output_directory: Merged
 
 ---
 
+
+
 ## Published Topics
 
-| Topic | Type | Description |
-|---|---|---|
-| `/first_kf_node` | `sensor_msgs/PointCloud2` | Session 1 keyframe positions |
-| `/second_kf_node` | `sensor_msgs/PointCloud2` | Session 2 keyframe positions |
-| `/merge_kf_node` | `sensor_msgs/PointCloud2` | Merged keyframe positions |
-| `/First_path` | `nav_msgs/Path` | Session 1 optimized trajectory |
-| `/Second_path` | `nav_msgs/Path` | Session 2 optimized trajectory |
-| `/Merge_path` | `nav_msgs/Path` | Combined trajectory |
-| `/Merge_map` | `sensor_msgs/PointCloud2` | Full merged point cloud map |
-| `/loopLine` | `visualization_msgs/Marker` | Inter-session loop constraint visualization |
-| `/lt_mapping_complete` | `std_msgs/Bool` | Published `true` upon completion |
+
+| Topic                  | Type                        | Description                                 |
+| ---------------------- | --------------------------- | ------------------------------------------- |
+| `/first_kf_node`       | `sensor_msgs/PointCloud2`   | Session 1 keyframe positions                |
+| `/second_kf_node`      | `sensor_msgs/PointCloud2`   | Session 2 keyframe positions                |
+| `/merge_kf_node`       | `sensor_msgs/PointCloud2`   | Merged keyframe positions                   |
+| `/First_path`          | `nav_msgs/Path`             | Session 1 optimized trajectory              |
+| `/Second_path`         | `nav_msgs/Path`             | Session 2 optimized trajectory              |
+| `/Merge_path`          | `nav_msgs/Path`             | Combined trajectory                         |
+| `/Merge_map`           | `sensor_msgs/PointCloud2`   | Full merged point cloud map                 |
+| `/loopLine`            | `visualization_msgs/Marker` | Inter-session loop constraint visualization |
+| `/lt_mapping_complete` | `std_msgs/Bool`             | Published `true` upon completion            |
+
 
 ---
+
+
 
 ## Output Files
 
@@ -444,10 +396,11 @@ All outputs are written to `<package_root>/<output_directory>/`:
 <output_directory>/
 ├── FirstMap.pcd              ← Session 1 full map (optimized poses)
 ├── FirstGroundMap.pcd        ← Session 1 ground points
-├── FirstNonGroundMap.pcd     ← Session 1 non-ground points
+├── FirstNonGroundMap.pcd     ← Session 1 non-ground points (PD/ND input)
 ├── SecondMap.pcd             ← Session 2 full map
 ├── SecondGroundMap.pcd
 ├── SecondNonGroundMap.pcd
+├── StaticMap.pcd             ← Composed static map (ND + self-void removed)
 ├── optimized_poses.txt       ← Merged pose list (same format as input)
 ├── edges.txt                 ← Merged edge list
 ├── Scans/                    ← Re-indexed keyframe PCD files
@@ -455,19 +408,26 @@ All outputs are written to `<package_root>/<output_directory>/`:
 │   └── ...
 └── Debug/
     ├── KissMatchedMap.pcd    ← Session 1 + 2 maps aligned by KISS-Matcher (intensity-coded per session)
-    ├── ND.pcd                ← Negative-difference (disappeared) points
-    ├── PD.pcd                ← Positive-difference (appeared) points
-    ├── FirstUE.pcd           ← Session 1 unexplored area (UE) points
-    └── SecondUE.pcd          ← Session 2 unexplored area (UE) points
+    ├── ND.pcd                ← Non-ground negative-difference (disappeared)
+    ├── PD.pcd                ← Non-ground positive-difference (appeared)
+    ├── FirstUE.pcd           ← Session 1 full-map unexplored (UE)
+    └── SecondUE.pcd          ← Session 2 full-map unexplored (UE)
 ```
 
-The `Debug/ND.pcd` and `Debug/PD.pcd` files can be fed into a downstream change-management module (e.g., static map construction, dynamic object removal).
+`Debug/ND.pcd` / `PD.pcd` are structure-change clouds (non-ground only). UE clouds use the full
+map. `StaticMap.pcd` is published on `/Merge_map`.
 
 ---
 
+
+
 ## Algorithm Details
 
+
+
 ### 1. Global Alignment & Anchor-node Pose-graph Optimization
+
+
 
 #### 1-1. Why global alignment first?
 
@@ -476,17 +436,23 @@ Each session builds its own local map from an arbitrary starting pose, so their 
 1. **Linearization error** — the Jacobian computed at a wrong operating point points in the wrong direction, causing divergence or convergence to a bad local minimum.
 2. **Cauchy kernel saturation** — loop closure edges use a Cauchy robust kernel (parameter = 1.0). When the residual of a loop edge greatly exceeds the Cauchy threshold, the kernel saturates and the edge's effective weight drops to near zero. Even with many correct inter-session loops, the optimizer treats them all as outliers and ignores them.
 
-#### 1-2. Initial inter-session transform via KISS-Matcher 
+
+
+#### 1-2. Initial inter-session transform via KISS-Matcher
 
 Before any keyframe-level loop detection, **KISS-Matcher** registers the two full static maps to compute a 6-DOF rigid body transform that maps Session 2's coordinate frame into Session 1's world frame, providing the initial estimate for all Session 2 nodes and placing them close enough to their true positions for iSAM2 to converge reliably.
 
-| Parameter | Description |
-|---|---|
+
+| Parameter           | Description                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `anchor_resolution` | Voxel downsampling resolution for KISS-Matcher [m]. Larger values are faster but less accurate. Typical range: 1.0–3.0 m |
+
 
 The two maps, aligned by the resulting transform and colour-coded by session (intensity `1` = Session 1, `2` = Session 2), are saved to `Debug/KissMatchedMap.pcd` so the global registration quality can be inspected before pose-graph optimization runs.
 
 > `StaticMap.pcd` must be the static-only point cloud map (dynamic objects removed), compatible with the output of [Pose_Graph_Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization).
+
+
 
 #### 1-3. Anchor-node pose-graph optimization
 
@@ -516,21 +482,30 @@ DOP_ratio = matching_DOP / max(curr_DOP, target_DOP)
 
 must fall below `dop_thres`, and the normalized `matching_DOP` itself must stay below an absolute cap (`1.2`); matches failing either check indicate insufficient geometric constraint and are discarded.
 
-### 4. Tile-based Change Detection
+### 4. Void-evidence Change Detection
 
-Change detection runs in two sequential phases.
+Implemented in `src/voxel_evidence.cpp`. Overview of the data flow:
 
-#### Phase 1 — Unexplored Area (UE) Detection
+```
+full keyframe scans ──► UFOMap void/hit maps (SEEN_FREE | REFLECTION)
+NonGround maps      ──► interest + log-odds classify ──► ND / PD
+full maps           ──► opposite-session observe check ──► UE
+full maps           ──► compose StaticMap (drop ND + self-seenFree; keep UE)
+```
 
-Each session's keyframe scans are projected onto a 2D binary voxel grid (2 m × 2 m cells, XY plane). Scan voxels that do not overlap with the other session's map grid are classified as **unexplored areas (UE)** . A DOP check filters out geometrically degenerate keyframes before accumulation. Both UE clouds are saved to `Debug/FirstUE.pcd` and `Debug/SecondUE.pcd`.
+1. `buildVoidMap` — insert each session's full keyframe scans into a UFOMap
+  (`SEEN_FREE | REFLECTION`) with `inflate_unknown=1`, then `propagateModified()`.
+2. `detectAndCompose` — interest/evidence/ND/PD from `First/SecondNonGroundMap.pcd`;
+  UE from full `First/SecondMap.pcd` (no opposite-session hit/free, with optional dilate).
+3. `composeFinalMap` — start from full maps, remove session-1 ND voxels and
+  self-`seenFree` dynamic points, keep session-2 points conservatively, voxel-downsample.
 
-#### Phase 2 — PD / ND Computation on UE-filtered Maps
-
-UE points are removed from each session's map before the set-difference analysis. The merged map is then partitioned into 100 m × 100 m tiles, and for each tile:
-- Session 1 points with no neighbour in Session 2 within `voxel_size` → **ND** (disappeared structures)
-- Session 2 points with no neighbour in Session 1 within `voxel_size` → **PD** (new structures)
+Ground is excluded from PD/ND (registration shells) but kept in UE so unexplored ground
+regions remain visible. See [Configuration](#configuration) for `persistence.*` knobs.
 
 ---
+
+
 
 ## Related Projects
 
@@ -540,19 +515,26 @@ UE points are removed from each session's map before the set-difference analysis
 
 ---
 
+
+
 ## Acknowledgements
 
 This package integrates or adapts the following open-source works:
 
-| Library / Code | Authors | License | Link |
-|---|---|---|---|
-| **KISS-Matcher** | Hyungtae Lim et al. | MIT | [MIT-SPARK/KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher) |
-| **ROBIN** | MIT-SPARK Lab | MIT | [MIT-SPARK/ROBIN](https://github.com/MIT-SPARK/ROBIN) |
-| **SOLiD descriptor** | Hogyun Kim et al. | MIT | [sparolab/solid](https://github.com/sparolab/solid) |
-| **NanoGICP** | Ken Nakamura | MIT | [engcang/nano_gicp](https://github.com/engcang/nano_gicp) |
-| **GTSAM** | Frank Dellaert et al. | BSD-2 | [borglab/gtsam](https://github.com/borglab/gtsam) |
+
+| Library / Code       | Authors                        | License | Link                                                                        |
+| -------------------- | ------------------------------ | ------- | --------------------------------------------------------------------------- |
+| **KISS-Matcher**     | Hyungtae Lim et al.            | MIT     | [MIT-SPARK/KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher)         |
+| **ROBIN**            | MIT-SPARK Lab                  | MIT     | [MIT-SPARK/ROBIN](https://github.com/MIT-SPARK/ROBIN)                       |
+| **SOLiD descriptor** | Hogyun Kim et al.              | MIT     | [sparolab/solid](https://github.com/sparolab/solid)                         |
+| **NanoGICP**         | Ken Nakamura                   | MIT     | [engcang/nano_gicp](https://github.com/engcang/nano_gicp)                   |
+| **GTSAM**            | Frank Dellaert et al.          | BSD-2   | [borglab/gtsam](https://github.com/borglab/gtsam)                           |
+| **UFOMap**           | Daniel Duberg, Patric Jensfelt | BSD-3   | [UnknownFreeOccupied/ufomap](https://github.com/UnknownFreeOccupied/ufomap) |
+
 
 ---
+
+
 
 ## License
 
@@ -585,4 +567,5 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 ```
 
-> Third-party components (SOLiD, NanoGICP, nanoflann) retain their own licenses as listed in [Acknowledgements](#acknowledgements). All third-party licenses (MIT / BSD-2) are compatible with BSD-2-Clause.
+> Third-party components (SOLiD, NanoGICP, nanoflann, UFOMap, KISS-Matcher) retain their own licenses as listed in [Acknowledgements](#acknowledgements). MIT / BSD-2 / BSD-3 are compatible with BSD-2-Clause.
+

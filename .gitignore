@@ -14,7 +14,9 @@ CMakeFiles/
 
 # 편집기
 .vscode/
+.cursor/
 *.swp
 *.swo
 *.pcd
 *.txt
+*.mdc
