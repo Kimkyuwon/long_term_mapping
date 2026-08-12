@@ -7,11 +7,16 @@
 #include <optional>
 #include <chrono>
 #include <sstream>
-#include <unordered_set>
 #include <algorithm>
+#include <numeric>
 #include <limits>
+#include <filesystem>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <rclcpp/rclcpp.hpp>
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <std_msgs/msg/bool.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -58,6 +63,7 @@
 #include <kiss_matcher/FasterPFH.hpp>
 #include <kiss_matcher/GncSolver.hpp>
 #include <kiss_matcher/KISSMatcher.hpp>
+#include "ltslam/BetweenFactorWithAnchoring.h"
 
 #include "voxel_evidence.hpp"
 
@@ -66,6 +72,7 @@
 
 using namespace std;
 using namespace gtsam;
+namespace fs = std::filesystem;
 
 struct Pose6 {
     double x;
@@ -127,6 +134,29 @@ gtsam::Pose3 A2_anchor;
 double anchor_resolution;
 double loop_search_radius;
 vector<pair<int, int>> loop_pairs;
+std::set<std::pair<int, int>> first_session_edge_pairs;
+std::set<std::pair<int, int>> second_session_edge_pairs;
+float session_rigid_residual_thres = -1.0f;
+float rebuild_pose_shift_thres = 0.0f;
+
+// [Phase2.0] 항목7(루프 엣지 GICP 정합 품질) 실측 전용 진단 버퍼. 그래프 구성에는 영향 없음
+struct LoopGicpDiagnostic {
+    bool converged;
+    double fitness_score;
+    double matching_dop;
+    double dop_ratio;
+    bool accepted;
+};
+std::vector<LoopGicpDiagnostic> loop_gicp_diagnostics;
+
+struct SessionRigidResidualStats {
+    int session_id = 0;
+    size_t sample_count = 0;
+    double rms = 0.0;
+    double max_residual = 0.0;
+    double rigid_translation_norm = 0.0;
+    double rigid_rotation_deg = 0.0;
+};
 
 visualization_msgs::msg::Marker loopLine;
 nav_msgs::msg::Path FirstMap_path, SecondMap_path, Merge_path;
@@ -178,6 +208,9 @@ void setParams (std::shared_ptr<rclcpp::Node> nh)
     nh->declare_parameter("output_directory", std::string(""));
 
     nh->declare_parameter("persistence.res", 0.2);
+    nh->declare_parameter("evidence.res", 0.2);
+    nh->declare_parameter("persistence.session_rigid_residual_thres", -1.0);
+    nh->declare_parameter("persistence.rebuild_pose_shift_thres", 0.0);
 
     nh->get_parameter_or<double>("blind", blind, 0.01);
     nh->get_parameter_or<double>("r_solid_thres", R_SOLiD_THRES, 0.99);
@@ -195,7 +228,13 @@ void setParams (std::shared_ptr<rclcpp::Node> nh)
     nh->get_parameter_or<double>("dop_thres", dop_thres, 0.5);
     nh->get_parameter_or<double>("loop_search_radius", loop_search_radius, 15.0);
 
-    nh->get_parameter_or<float>("persistence.res", persistence_params.res, 0.2f);
+    nh->get_parameter_or<float>("evidence.res", persistence_params.res, 0.2f);
+    nh->get_parameter_or<float>("persistence.res", persistence_params.res, persistence_params.res);
+    nh->get_parameter_or<float>("persistence.session_rigid_residual_thres", session_rigid_residual_thres, -1.0f);
+    nh->get_parameter_or<float>("persistence.rebuild_pose_shift_thres", rebuild_pose_shift_thres, 0.0f);
+    if (session_rigid_residual_thres < 0.0f) {
+        session_rigid_residual_thres = persistence_params.res * 0.25f;
+    }
 
     // 먼저 ROS2 파라미터에서 값 확인
     nh->get_parameter_or<std::string>("directory1", directory1, std::string(""));
@@ -206,6 +245,9 @@ void setParams (std::shared_ptr<rclcpp::Node> nh)
     std::cout << "directory1: " << directory1 << std::endl;
     std::cout << "directory2: " << directory2 << std::endl;
     std::cout << "output_directory: " << output_directory << std::endl;
+    std::cout << "evidence.res: " << persistence_params.res << std::endl;
+    std::cout << "persistence.session_rigid_residual_thres: " << session_rigid_residual_thres << std::endl;
+    std::cout << "persistence.rebuild_pose_shift_thres: " << rebuild_pose_shift_thres << std::endl;
 
     
     solidModule.setParams(FOV_u, FOV_d, NUM_ANGLE, NUM_RANGE, NUM_HEIGHT, MIN_DISTANCE, MAX_DISTANCE, VOXEL_SIZE, NUM_EXCLUDE_RECENT, NUM_CANDIDATES_FROM_TREE, R_SOLiD_THRES);
@@ -213,7 +255,7 @@ void setParams (std::shared_ptr<rclcpp::Node> nh)
     gicp.setMaxCorrespondenceDistance(2.0);
     gicp.setNumThreads(4);
     gicp.setCorrespondenceRandomness(15);
-    gicp.setMaximumIterations(3);
+    gicp.setMaximumIterations(10);
     gicp.setTransformationEpsilon(0.01);
     gicp.setEuclideanFitnessEpsilon(0.01);
 
@@ -301,6 +343,29 @@ int getGlobalNodeIdx(int session_idx, int node_idx)
     return (session_idx * 1000000) + node_idx;
 }
 
+// getGlobalNodeIdx(session*1e6+idx)와 겹치지 않는 오프셋. session_idx는 1~수십 범위이므로
+// 9억을 더해도 getGlobalNodeIdx가 만들 수 있는 최대값(대략 수십*1e6)과 충돌하지 않는다.
+constexpr int kAnchorNodeIdxBase = 900000000;
+
+// 세션 앵커(세션 로컬 → 전역) 변환을 담는 그래프 변수의 키.
+// LT-mapper(ltslam) Form A: 앵커를 노드 값에 미리 곱해 넣지 않고 별도 변수로 명시한다
+// (utility.cpp의 genAnchorNodeIdx와 동일한 설계).
+int getAnchorNodeIdx(int session_idx)
+{
+    return kAnchorNodeIdxBase + session_idx;
+}
+
+// 세션 로컬 노드의 전역 포즈 = 그 세션의 앵커 ∘ 로컬 노드 값.
+// 세션1 앵커는 항등원으로 고정되므로 anchor.compose(local) == local과 사실상 동일하다.
+// updatePoses()/generateOptimizedMap()/MapUpdate()의 make_loader 3곳에서 공통으로 써서
+// 앵커 합성을 빠뜨리는 실수를 구조적으로 막는다.
+gtsam::Pose3 getGlobalPose(int session_idx, int node_idx)
+{
+    const gtsam::Pose3 anchor = isamCurrentEstimate.at<gtsam::Pose3>(getAnchorNodeIdx(session_idx));
+    const gtsam::Pose3 local = isamCurrentEstimate.at<gtsam::Pose3>(getGlobalNodeIdx(session_idx, node_idx));
+    return anchor.compose(local);
+}
+
 Eigen::Matrix4f createTransformMatrix(const Pose6& pose)
 {
     Eigen::Matrix3f rotation = (Eigen::AngleAxisf(pose.yaw, Eigen::Vector3f::UnitZ())
@@ -316,6 +381,117 @@ Eigen::Matrix4f createTransformMatrix(const Pose6& pose)
     return transform;
 }
 
+SessionRigidResidualStats evaluateSessionRigidity(
+    int session_id,
+    const std::vector<Pose6>& original_poses,
+    const std::vector<Pose6>& optimized_poses)
+{
+    SessionRigidResidualStats stats;
+    stats.session_id = session_id;
+
+    const size_t count = std::min(original_poses.size(), optimized_poses.size());
+    if (count < 3) {
+        return stats;
+    }
+
+    Eigen::MatrixXd src(3, count);
+    Eigen::MatrixXd dst(3, count);
+    for (size_t i = 0; i < count; ++i) {
+        src(0, i) = original_poses[i].x;
+        src(1, i) = original_poses[i].y;
+        src(2, i) = original_poses[i].z;
+        dst(0, i) = optimized_poses[i].x;
+        dst(1, i) = optimized_poses[i].y;
+        dst(2, i) = optimized_poses[i].z;
+    }
+
+    Eigen::Matrix4d tf = Eigen::umeyama(src, dst, false);
+    const Eigen::Matrix3d rot = tf.block<3, 3>(0, 0);
+    const Eigen::Vector3d trans = tf.block<3, 1>(0, 3);
+
+    double sum_sq = 0.0;
+    double max_res = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        Eigen::Vector4d src_h(src(0, i), src(1, i), src(2, i), 1.0);
+        Eigen::Vector3d aligned = (tf * src_h).head<3>();
+        const Eigen::Vector3d target(dst(0, i), dst(1, i), dst(2, i));
+        const double residual = (aligned - target).norm();
+        sum_sq += residual * residual;
+        max_res = std::max(max_res, residual);
+    }
+
+    const double trace = std::max(-1.0, std::min(3.0, rot.trace()));
+    const double rot_angle = std::acos((trace - 1.0) * 0.5);
+
+    stats.sample_count = count;
+    stats.rms = std::sqrt(sum_sq / static_cast<double>(count));
+    stats.max_residual = max_res;
+    stats.rigid_translation_norm = trans.norm();
+    stats.rigid_rotation_deg = rot_angle * 180.0 / M_PI;
+    return stats;
+}
+
+void logSessionRigidityStats(const SessionRigidResidualStats& stats, float threshold, float shift_threshold)
+{
+    if (stats.sample_count == 0) {
+        RCLCPP_WARN(
+            rclcpp::get_logger("LTmapping"),
+            "[Phase2.0/2.4] session %d rigidity stats skipped (need >=3 poses)",
+            stats.session_id);
+        return;
+    }
+
+    const bool residual_ok = stats.rms <= static_cast<double>(threshold);
+    const bool shift_ok = stats.rigid_translation_norm <= static_cast<double>(shift_threshold);
+    RCLCPP_INFO(
+        rclcpp::get_logger("LTmapping"),
+        "[Phase2.0/2.4] session %d RMS=%.6f max=%.6f thres=%.6f residual_ok=%s "
+        "rigid_shift(m)=%.6f shift_thres=%.6f shift_ok=%s rot_deg=%.6f samples=%zu",
+        stats.session_id,
+        stats.rms,
+        stats.max_residual,
+        static_cast<double>(threshold),
+        residual_ok ? "true" : "false",
+        stats.rigid_translation_norm,
+        static_cast<double>(shift_threshold),
+        shift_ok ? "true" : "false",
+        stats.rigid_rotation_deg,
+        stats.sample_count);
+}
+
+// [Phase2.0] 항목7 실측 전용 — 루프 후보 전체(accept+reject)의 GICP 수렴률/적합도 요약. 그래프 구성 로직과 무관
+void logLoopGicpDiagnostics()
+{
+    if (loop_gicp_diagnostics.empty()) {
+        RCLCPP_INFO(rclcpp::get_logger("LTmapping"),
+            "[Phase2.0] Loop GICP diagnostics: no candidates evaluated");
+        return;
+    }
+    size_t converged_count = 0, accepted_count = 0;
+    std::vector<double> accepted_fitness, all_fitness;
+    for (const auto& d : loop_gicp_diagnostics) {
+        if (d.converged) ++converged_count;
+        if (d.accepted) ++accepted_count;
+        all_fitness.push_back(d.fitness_score);
+        if (d.accepted) accepted_fitness.push_back(d.fitness_score);
+    }
+    auto median = [](std::vector<double> v) -> double {
+        if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    const double all_mean = std::accumulate(all_fitness.begin(), all_fitness.end(), 0.0) / all_fitness.size();
+    const double accepted_mean = accepted_fitness.empty() ? std::numeric_limits<double>::quiet_NaN()
+        : std::accumulate(accepted_fitness.begin(), accepted_fitness.end(), 0.0) / accepted_fitness.size();
+    RCLCPP_INFO(rclcpp::get_logger("LTmapping"),
+        "[Phase2.0] Loop GICP diagnostics: candidates=%zu converged=%zu(%.1f%%) accepted=%zu(%.1f%%) "
+        "fitness_all(mean=%.6f median=%.6f) fitness_accepted(mean=%.6f median=%.6f)",
+        loop_gicp_diagnostics.size(), converged_count,
+        100.0 * converged_count / loop_gicp_diagnostics.size(),
+        accepted_count, 100.0 * accepted_count / loop_gicp_diagnostics.size(),
+        all_mean, median(all_fitness), accepted_mean, median(accepted_fitness));
+}
+
 pcl::PointCloud<pcl::PointXYZI>::Ptr loadPointCloud(const std::string& filepath)
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZI>());
@@ -323,6 +499,28 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr loadPointCloud(const std::string& filepath)
         RCLCPP_ERROR(rclcpp::get_logger("posegraphoptimization"), "Failed to load point cloud: %s", filepath.c_str());
     }
     return cloud;
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr loadRawScanPointCloud(const std::string& scans_dir, int idx)
+{
+    const std::string raw_path = scans_dir + std::to_string(idx) + ".pcd";
+    if (!fs::exists(raw_path)) {
+        RCLCPP_ERROR(rclcpp::get_logger("LTmapping"),
+                     "Raw scan missing: %s", raw_path.c_str());
+        return pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>());
+    }
+    return loadPointCloud(raw_path);
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr loadProcessedScanPointCloud(const std::string& scans_dir, int idx)
+{
+    const std::string processed_path = scans_dir + std::to_string(idx) + "_remove.pcd";
+    if (!fs::exists(processed_path)) {
+        RCLCPP_ERROR(rclcpp::get_logger("LTmapping"),
+                     "Processed scan missing: %s", processed_path.c_str());
+        return pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>());
+    }
+    return loadPointCloud(processed_path);
 }
 
 double computeDOP(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, Eigen::Vector3d pos)
@@ -374,10 +572,8 @@ double computeDOP(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud, Eigen::Vect
 
 std::optional<gtsam::Pose3> doGICPVirtualRelative( int _loop_kf_idx, int _curr_kf_idx, Eigen::Matrix4f delta_TF)
 {
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::PointCloud<pcl::PointXYZI>::Ptr targetKeyframeCloud(new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::io::loadPCDFile(dir2_scans_path + std::to_string(_curr_kf_idx) + ".pcd", *cureKeyframeCloud);
-    pcl::io::loadPCDFile(dir1_scans_path + std::to_string(_loop_kf_idx) + ".pcd", *targetKeyframeCloud);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadProcessedScanPointCloud(dir2_scans_path, _curr_kf_idx);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr targetKeyframeCloud = loadProcessedScanPointCloud(dir1_scans_path, _loop_kf_idx);
     pcl::VoxelGrid<pcl::PointXYZI> downSizeFilter;
     downSizeFilter.setLeafSize(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
     downSizeFilter.setInputCloud(cureKeyframeCloud);
@@ -422,6 +618,11 @@ std::optional<gtsam::Pose3> doGICPVirtualRelative( int _loop_kf_idx, int _curr_k
     
     double dop_ratio = matching_dop / max_dop;
 
+    // [Phase2.0] 항목7 실측: accept/reject 여부와 무관하게 GICP 수렴/적합도를 기록
+    const bool gicp_accept = (dop_ratio < dop_thres && matching_dop < 1.0);
+    loop_gicp_diagnostics.push_back(LoopGicpDiagnostic{
+        gicp.hasConverged(), gicp.getFitnessScore(), matching_dop, dop_ratio, gicp_accept});
+
     if (dop_ratio < dop_thres && matching_dop < 1.0)
     {
         Eigen::Matrix3f edge_rot = edge_TF.block(0, 0, 3, 3);
@@ -453,15 +654,16 @@ void updatePoses(void)
       // 첫 번째 맵 처리
     for (int i = 0; i < FirstMapSize; i++) 
     {
-        int global_key = getGlobalNodeIdx(1, i);
-        // 첫 번째 맵 처리 로직
+        // 세션1은 앵커가 항등원으로 고정되므로 getGlobalPose == 로컬 노드 값이지만,
+        // 세션1/세션2를 동일 경로로 통일해 두면 앵커 처리 누락을 구조적으로 방지한다.
+        gtsam::Pose3 global_pose = getGlobalPose(1, i);
         geometry_msgs::msg::PoseStamped poseStampPGO;
         poseStampPGO.header.frame_id = "map";
-        poseStampPGO.pose.position.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
-        poseStampPGO.pose.position.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
-        poseStampPGO.pose.position.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
+        poseStampPGO.pose.position.x = global_pose.translation().x();
+        poseStampPGO.pose.position.y = global_pose.translation().y();
+        poseStampPGO.pose.position.z = global_pose.translation().z();
         tf2::Quaternion quat_tf2;
-        quat_tf2.setRPY(isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll(), isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch(), isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw());
+        quat_tf2.setRPY(global_pose.rotation().roll(), global_pose.rotation().pitch(), global_pose.rotation().yaw());
         poseStampPGO.pose.orientation = tf2::toMsg(quat_tf2);
         Merge_path.header.frame_id = "map";
         Merge_path.poses.push_back(poseStampPGO);
@@ -474,15 +676,16 @@ void updatePoses(void)
     // 두 번째 맵 처리  
     for (int i = 0; i < SecondMapSize; i++) 
     {
-        int global_key = getGlobalNodeIdx(2, i);
-        // 두 번째 맵 처리 로직
+        // 세션2 로컬 노드는 앵커가 곱해지지 않은 순수 로컬 좌표이므로, 앵커 합성을 거쳐야
+        // 비로소 전역 좌표가 된다 (필수 구현 스펙 (5)).
+        gtsam::Pose3 global_pose = getGlobalPose(2, i);
         geometry_msgs::msg::PoseStamped poseStampPGO;
         poseStampPGO.header.frame_id = "map";
-        poseStampPGO.pose.position.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
-        poseStampPGO.pose.position.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
-        poseStampPGO.pose.position.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
+        poseStampPGO.pose.position.x = global_pose.translation().x();
+        poseStampPGO.pose.position.y = global_pose.translation().y();
+        poseStampPGO.pose.position.z = global_pose.translation().z();
         tf2::Quaternion quat_tf2;
-        quat_tf2.setRPY(isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll(), isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch(), isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw());
+        quat_tf2.setRPY(global_pose.rotation().roll(), global_pose.rotation().pitch(), global_pose.rotation().yaw());
         poseStampPGO.pose.orientation = tf2::toMsg(quat_tf2);
         Merge_path.header.frame_id = "map";
         Merge_path.poses.push_back(poseStampPGO);
@@ -514,6 +717,33 @@ void runISAM2opt(void)
     updatePoses();
 }
 
+// [설계 근거] 이 함수는 의도적으로 getGlobalPose()(앵커 합성)를 쓰지 않고 세션 로컬 노드
+// 값을 그대로 읽는다. evaluateSessionRigidity()의 Umeyama 정합은 두 점 집합 사이의 임의
+// 강체 변환을 스스로 찾아 제거하므로, 여기서 앵커를 곱하든 안 곱하든 잔차(RMS)는 이론상
+// 동일하다. 오히려 앵커를 곱하지 않으면 "세션 로컬 좌표계끼리의 강성 비교"라는 의미가
+// 더 명확해지므로 Form A 전환 후에는 이 방식이 더 적절하다. 따라서 이 함수와
+// evaluateSessionRigidity()는 이번 작업에서 변경하지 않는다.
+std::vector<Pose6> collectOptimizedSessionPoses(int session_id, int session_size)
+{
+    std::vector<Pose6> poses;
+    poses.reserve(std::max(0, session_size));
+    for (int i = 0; i < session_size; ++i) {
+        const int global_key = getGlobalNodeIdx(session_id, i);
+        if (!isamCurrentEstimate.exists(global_key)) {
+            break;
+        }
+        Pose6 pose;
+        pose.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
+        pose.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
+        pose.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
+        pose.roll = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll();
+        pose.pitch = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch();
+        pose.yaw = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw();
+        poses.push_back(pose);
+    }
+    return poses;
+}
+
 void generateOptimizedMap()
 {
     pcl::PointCloud<pcl::PointXYZI>::Ptr FirstOptimizedMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
@@ -524,24 +754,26 @@ void generateOptimizedMap()
 
     for (int i = 0; i < FirstMapSize; i++) 
     {
-        int global_key = getGlobalNodeIdx(1, i);
+        gtsam::Pose3 global_pose = getGlobalPose(1, i);
         Pose6 keyPose;
-        keyPose.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
-        keyPose.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
-        keyPose.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
-        keyPose.roll = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll();
-        keyPose.pitch = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch();
-        keyPose.yaw = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw();
+        keyPose.x = global_pose.translation().x();
+        keyPose.y = global_pose.translation().y();
+        keyPose.z = global_pose.translation().z();
+        keyPose.roll = global_pose.rotation().roll();
+        keyPose.pitch = global_pose.rotation().pitch();
+        keyPose.yaw = global_pose.rotation().yaw();
 
         MergeMapPoses.push_back(keyPose);        
 
         Eigen::Matrix4f TF = createTransformMatrix(keyPose);
         
-        pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadPointCloud(dir1_scans_path + to_string(i) + ".pcd");
+        pcl::PointCloud<pcl::PointXYZI>::Ptr rawKeyframeCloud = loadRawScanPointCloud(dir1_scans_path, i);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadProcessedScanPointCloud(dir1_scans_path, i);
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureNGKeyframeCloud = loadPointCloud(dir1_scans_path + to_string(i) + "_nonground.pcd");
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureGKeyframeCloud = loadPointCloud(dir1_scans_path + to_string(i) + "_ground.pcd");
 
-        pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + ".pcd", *cureKeyframeCloud); // scan data 
+        pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + ".pcd", *rawKeyframeCloud); // raw scan data
+        pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + "_remove.pcd", *cureKeyframeCloud); // processed scan data
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + "_nonground.pcd", *cureNGKeyframeCloud); // scan data 
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i) + "_ground.pcd", *cureGKeyframeCloud); // scan data 
         
@@ -572,24 +804,26 @@ void generateOptimizedMap()
     pcl::PointCloud<pcl::PointXYZI>::Ptr SecondNonGroundMapCloud(new pcl::PointCloud<pcl::PointXYZI>());
     for (int i = 0; i < SecondMapSize; i++) 
     {
-        int global_key = getGlobalNodeIdx(2, i);
+        gtsam::Pose3 global_pose = getGlobalPose(2, i);
         Pose6 keyPose;
-        keyPose.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
-        keyPose.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
-        keyPose.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
-        keyPose.roll = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll();
-        keyPose.pitch = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch();
-        keyPose.yaw = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw();
+        keyPose.x = global_pose.translation().x();
+        keyPose.y = global_pose.translation().y();
+        keyPose.z = global_pose.translation().z();
+        keyPose.roll = global_pose.rotation().roll();
+        keyPose.pitch = global_pose.rotation().pitch();
+        keyPose.yaw = global_pose.rotation().yaw();
 
         MergeMapPoses.push_back(keyPose);
 
         Eigen::Matrix4f TF = createTransformMatrix(keyPose);
         
-        pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + ".pcd");
+        pcl::PointCloud<pcl::PointXYZI>::Ptr rawKeyframeCloud = loadRawScanPointCloud(dir2_scans_path, i);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cureKeyframeCloud = loadProcessedScanPointCloud(dir2_scans_path, i);
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureNGKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + "_nonground.pcd");
         pcl::PointCloud<pcl::PointXYZI>::Ptr cureGKeyframeCloud = loadPointCloud(dir2_scans_path + to_string(i) + "_ground.pcd");
         
-        pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + ".pcd", *cureKeyframeCloud); // scan data 
+        pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + ".pcd", *rawKeyframeCloud); // raw scan data
+        pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + "_remove.pcd", *cureKeyframeCloud); // processed scan data
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + "_nonground.pcd", *cureNGKeyframeCloud); // scan data 
         pcl::io::savePCDFileBinary(ScanDirectory + to_string(i+FirstMapSize) + "_ground.pcd", *cureGKeyframeCloud); // scan data 
 
@@ -816,6 +1050,9 @@ bool loadFiles()
 
 void getEdges()
 {
+    first_session_edge_pairs.clear();
+    second_session_edge_pairs.clear();
+
     for (int k = 0; k < FirstMapEdges.size(); k++)
     {
         auto edge = FirstMapEdges[k];
@@ -826,7 +1063,7 @@ void getEdges()
         noiseModel::Diagonal::shared_ptr EdgeNoise = noiseModel::Diagonal::Variances(edge_score);
         gtsam::Pose3 relative_pose = Pose6toGTSAMPose3(edge_pose);
         gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(getGlobalNodeIdx(1,prev_node_idx), getGlobalNodeIdx(1,curr_node_idx), relative_pose, EdgeNoise));
-        
+        first_session_edge_pairs.insert(std::make_pair(prev_node_idx, curr_node_idx));
     }
         
     for (int k = 0; k < SecondMapEdges.size(); k++)
@@ -839,32 +1076,14 @@ void getEdges()
         noiseModel::Diagonal::shared_ptr EdgeNoise = noiseModel::Diagonal::Variances(edge_score);
         gtsam::Pose3 relative_pose = Pose6toGTSAMPose3(edge_pose);
         gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(getGlobalNodeIdx(2,prev_node_idx), getGlobalNodeIdx(2,curr_node_idx), relative_pose, EdgeNoise));
+        second_session_edge_pairs.insert(std::make_pair(prev_node_idx, curr_node_idx));
     }
-}
 
-void placeRecognition()
-{
-    std::cout << "\033[2J\033[H";  // Clear screen and move cursor to top
-    std::cout << "First Map SOLiD Descriptor generating..." << std::endl;
-    for (int k = 0; k < FirstMapSize; k++)
-    {             
-        pcl::PointCloud<pcl::PointXYZI>::Ptr curr_pc (new pcl::PointCloud<pcl::PointXYZI>());
-        pcl::PointCloud<pcl::PointXYZI>::Ptr curr_pc_down (new pcl::PointCloud<pcl::PointXYZI>());
-        pcl::io::loadPCDFile(dir1_scans_path + std::to_string(k) + ".pcd", *curr_pc);
-        solidModule.down_sampling(*curr_pc, curr_pc_down);
-        solidModule.makeAndSaveSolid(*curr_pc_down);       
-    }
-    
-    std::cout << "\033[2J\033[H";  // Clear screen and move cursor to top
-    std::cout << "Second Map SOLiD Descriptor generating..." << std::endl;
-    for (int k = 0; k < SecondMapSize; k++)
-    {             
-        pcl::PointCloud<pcl::PointXYZI>::Ptr curr_pc (new pcl::PointCloud<pcl::PointXYZI>());
-        pcl::PointCloud<pcl::PointXYZI>::Ptr curr_pc_down (new pcl::PointCloud<pcl::PointXYZI>());
-        pcl::io::loadPCDFile(dir2_scans_path + std::to_string(k) + ".pcd", *curr_pc);
-        solidModule.down_sampling(*curr_pc, curr_pc_down);
-        solidModule.makeAndSaveSolid(*curr_pc_down);       
-    }
+    RCLCPP_INFO(
+        rclcpp::get_logger("LTmapping"),
+        "[Phase2.0] Loaded edge pairs: session1=%zu session2=%zu",
+        first_session_edge_pairs.size(),
+        second_session_edge_pairs.size());
 }
 
 void getLoopEdges()
@@ -939,10 +1158,8 @@ void getLoopEdges()
         const int prev_node_idx = nn_idx[0];
         const int curr_node_idx = i;
 
-        pcl::PointCloud<pcl::PointXYZI>::Ptr FirstScanCloud(new pcl::PointCloud<pcl::PointXYZI>());
-        pcl::io::loadPCDFile(dir1_scans_path + std::to_string(prev_node_idx) + ".pcd", *FirstScanCloud);
-        pcl::PointCloud<pcl::PointXYZI>::Ptr SecondScanCloud(new pcl::PointCloud<pcl::PointXYZI>());
-        pcl::io::loadPCDFile(dir2_scans_path + std::to_string(curr_node_idx) + ".pcd", *SecondScanCloud);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr FirstScanCloud = loadProcessedScanPointCloud(dir1_scans_path, prev_node_idx);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr SecondScanCloud = loadProcessedScanPointCloud(dir2_scans_path, curr_node_idx);
         std::vector<int> scan_first_indices;
         std::vector<int> scan_second_indices;
         pcl::removeNaNFromPointCloud(*FirstScanCloud, *FirstScanCloud, scan_first_indices);
@@ -969,7 +1186,7 @@ void getLoopEdges()
         }
         Eigen::Vector3d delta_vec(delta_TF(0, 3), delta_TF(1, 3), delta_TF(2, 3));
         double matching_dop = computeDOP(MatchingCloud, delta_vec);
-        if (matching_dop > 1.2)
+        if (matching_dop > dop_thres)
             continue;
 
         auto relative_pose_optional = doGICPVirtualRelative(prev_node_idx, curr_node_idx, delta_TF);
@@ -977,8 +1194,14 @@ void getLoopEdges()
         if (relative_pose_optional)
         {
             gtsam::Pose3 relative_pose = relative_pose_optional.value();
-            gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(
-                getGlobalNodeIdx(1, prev_node_idx), getGlobalNodeIdx(2, curr_node_idx), relative_pose, robustLoopNoise));
+            // Form A (LT-mapper ltslam): 세션 앵커를 노드 값에 곱해 넣지 않고 별도 그래프
+            // 변수로 명시한다. relative_pose는 이미 전역 좌표계 기준 상대 포즈이며,
+            // between(anchor1∘p1, anchor2∘p2)가 요구하는 측정값과 정확히 같은 양이다
+            // (relative_pose 계산 로직 자체는 변경하지 않음).
+            gtSAMgraph.add(gtsam::BetweenFactorWithAnchoring<gtsam::Pose3>(
+                getGlobalNodeIdx(1, prev_node_idx), getGlobalNodeIdx(2, curr_node_idx),
+                getAnchorNodeIdx(1),               getAnchorNodeIdx(2),
+                relative_pose, robustLoopNoise));
 
             edge_stream << prev_node_idx << " " << (curr_node_idx + FirstMapSize) << " "
                 << relative_pose.translation().x() << " " << relative_pose.translation().y() << " "
@@ -994,6 +1217,7 @@ void getLoopEdges()
 
 void getPoses()
 {
+
     for (int k = 0; k < FirstMapSize; k++)
     {        
         Pose6 current_pose = FirstMapPoses[k];
@@ -1014,6 +1238,12 @@ void getPoses()
             gtSAMgraph.add(gtsam::PriorFactor<gtsam::Pose3>(getGlobalNodeIdx(1,k), poseOrigin, priorNoise));
             initialEstimate.insert(getGlobalNodeIdx(1,k), poseOrigin);
 
+            // Form A (LT-mapper ltslam): 기준 세션(session 1)은 전역 좌표계 = 세션1
+            // 좌표계이므로 앵커를 항등원 + priorNoise로 고정한다 (180-A 게이트 고정
+            // 규칙을 앵커 노드에도 동일하게 적용).
+            gtSAMgraph.add(gtsam::PriorFactor<gtsam::Pose3>(getAnchorNodeIdx(1), gtsam::Pose3::Identity(), priorNoise));
+            initialEstimate.insert(getAnchorNodeIdx(1), gtsam::Pose3::Identity());
+
             gtSAMgraphMade = true;
         }
         else
@@ -1022,8 +1252,11 @@ void getPoses()
             gtsam::Pose3 poseTo = Pose6toGTSAMPose3(FirstMapPoses.at(k));
             // odom factor
             gtsam::Pose3 relPose = poseFrom.between(poseTo);
-
-            gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(getGlobalNodeIdx(1,k-1), getGlobalNodeIdx(1,k), relPose, odomNoise));
+            const std::pair<int, int> edge_pair = std::make_pair(k - 1, k);
+            if (first_session_edge_pairs.find(edge_pair) == first_session_edge_pairs.end()) {
+                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                    getGlobalNodeIdx(1, k - 1), getGlobalNodeIdx(1, k), relPose, odomNoise));
+            }
             initialEstimate.insert(getGlobalNodeIdx(1,k), poseTo);        
         } 
 
@@ -1049,11 +1282,13 @@ void getPoses()
     for (int k = 0; k < SecondMapSize; k++)
     {        
         Pose6 current_pose = SecondMapPoses[k];
+        // Form A: 그래프에 넣는 로컬 노드 값(poseCurr)에는 A2_anchor를 곱하지 않는다.
+        // 앵커는 별도 그래프 변수(getAnchorNodeIdx(2))로 존재하므로, 여기서 곱해 넣으면
+        // 이중 적용되어 세션2 전체가 엉뚱한 위치로 이동한다.
         gtsam::Pose3 poseCurr = Pose6toGTSAMPose3(current_pose);
-        Eigen::Matrix4d curr_TF = poseCurr.matrix();
-        Eigen::Matrix4d anchor_TF = A2_anchor.matrix();
-        Eigen::Matrix4d anchor_curr_TF = anchor_TF * curr_TF;
-        gtsam::Pose3 poseAnchorCurr(anchor_curr_TF);
+        // 시각화 미리보기용으로만 앵커를 합성한다 (RViz Second_path/Second_kf_node 발행).
+        // 그래프에 들어가는 값(poseCurr)과는 분리되어 있으므로 최적화 결과에는 영향 없다.
+        gtsam::Pose3 poseAnchorCurr = A2_anchor.compose(poseCurr);
 
         geometry_msgs::msg::PoseStamped poseStamped;
         poseStamped.header.frame_id = "map";
@@ -1067,9 +1302,15 @@ void getPoses()
 
         if (k == 0)
         {
-            // prior factor
-            gtSAMgraph.add(gtsam::PriorFactor<gtsam::Pose3>(getGlobalNodeIdx(2,k), poseAnchorCurr, largeNoise));
-            initialEstimate.insert(getGlobalNodeIdx(2,k), poseAnchorCurr);
+            // Form A: 세션2 앵커에 KISS-Matcher 초기 추정치 + largeNoise(느슨한 prior)를
+            // 걸어 루프 제약이 앵커를 교정할 수 있게 한다 (180-A 규칙의 "나머지 세션" 항).
+            gtSAMgraph.add(gtsam::PriorFactor<gtsam::Pose3>(getAnchorNodeIdx(2), A2_anchor, largeNoise));
+            initialEstimate.insert(getAnchorNodeIdx(2), A2_anchor);
+
+            // 로컬 0번 노드는 "로컬 좌표계의 원점"만 선언하므로 priorNoise로 타이트하게
+            // 고정한다. 세션이 전역에서 어디 놓이는지는 위 앵커가 전담한다.
+            gtSAMgraph.add(gtsam::PriorFactor<gtsam::Pose3>(getGlobalNodeIdx(2,k), poseCurr, priorNoise));
+            initialEstimate.insert(getGlobalNodeIdx(2,k), poseCurr);
         }
         else
         {
@@ -1078,9 +1319,12 @@ void getPoses()
             // odom factor
             gtsam::Pose3 relPose = poseFrom.between(poseTo);
 
-            int current_idx = FirstMapSize + k;
-            gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(getGlobalNodeIdx(2,k-1), getGlobalNodeIdx(2,k), relPose, odomNoise));
-            initialEstimate.insert(getGlobalNodeIdx(2,k), poseAnchorCurr);        
+            const std::pair<int, int> edge_pair = std::make_pair(k - 1, k);
+            if (second_session_edge_pairs.find(edge_pair) == second_session_edge_pairs.end()) {
+                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(
+                    getGlobalNodeIdx(2, k - 1), getGlobalNodeIdx(2, k), relPose, odomNoise));
+            }
+            initialEstimate.insert(getGlobalNodeIdx(2,k), poseCurr);
         }    
 
         pcl::PointXYZI kf_node;
@@ -1138,20 +1382,21 @@ void MapUpdate()
     auto make_loader = [](int session_id) {
         return [session_id](int local_idx, Eigen::Vector3f& origin) {
             Pose6 key_pose;
-            int global_key = getGlobalNodeIdx(session_id, local_idx);
-            key_pose.x = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().x();
-            key_pose.y = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().y();
-            key_pose.z = isamCurrentEstimate.at<gtsam::Pose3>(global_key).translation().z();
-            key_pose.roll = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().roll();
-            key_pose.pitch = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().pitch();
-            key_pose.yaw = isamCurrentEstimate.at<gtsam::Pose3>(global_key).rotation().yaw();
+            // session_id가 1이든 2이든 getGlobalPose() 하나로 앵커 합성까지 포함해 처리한다
+            // (세션1 앵커는 항등원이므로 결과는 기존과 동일).
+            gtsam::Pose3 global_pose = getGlobalPose(session_id, local_idx);
+            key_pose.x = global_pose.translation().x();
+            key_pose.y = global_pose.translation().y();
+            key_pose.z = global_pose.translation().z();
+            key_pose.roll = global_pose.rotation().roll();
+            key_pose.pitch = global_pose.rotation().pitch();
+            key_pose.yaw = global_pose.rotation().yaw();
 
             Eigen::Matrix4f tf = createTransformMatrix(key_pose);
             origin = Eigen::Vector3f(tf(0, 3), tf(1, 3), tf(2, 3));
 
-            std::string scan_path = (session_id == 1 ? dir1_scans_path : dir2_scans_path) +
-                                    std::to_string(local_idx) + ".pcd";
-            auto cloud = loadPointCloud(scan_path);
+            const std::string scans_dir = (session_id == 1 ? dir1_scans_path : dir2_scans_path);
+            auto cloud = loadRawScanPointCloud(scans_dir, local_idx);
             if (!cloud) {
                 return pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>());
             }
@@ -1248,6 +1493,7 @@ int main(int argc, char** argv)
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
     RCLCPP_INFO(rclcpp::get_logger("LTmapping"), "Loop Edge Generation Complete. size : %d", loop_pairs.size());
+    logLoopGicpDiagnostics();
 
     getPoses();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1257,6 +1503,13 @@ int main(int argc, char** argv)
     runISAM2opt();
 
     RCLCPP_INFO(rclcpp::get_logger("LTmapping"), "Graph Optimization Complete.");
+
+    const auto first_optimized = collectOptimizedSessionPoses(1, FirstMapSize);
+    const auto second_optimized = collectOptimizedSessionPoses(2, SecondMapSize);
+    const auto first_stats = evaluateSessionRigidity(1, FirstMapPoses, first_optimized);
+    const auto second_stats = evaluateSessionRigidity(2, SecondMapPoses, second_optimized);
+    logSessionRigidityStats(first_stats, session_rigid_residual_thres, rebuild_pose_shift_thres);
+    logSessionRigidityStats(second_stats, session_rigid_residual_thres, rebuild_pose_shift_thres);
 
     generateOptimizedMap();
     

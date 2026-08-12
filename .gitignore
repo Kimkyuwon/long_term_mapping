@@ -2,6 +2,10 @@
 Campus1/
 Campus2/
 ELIOS3_map/
+b2_1/
+b2_2/
+b2_3/
+b2_merge/
 
 # 빌드 산출물
 build/
@@ -19,4 +23,6 @@ CMakeFiles/
 *.swo
 *.pcd
 *.txt
+!CMakeLists.txt
+!**/CMakeLists.txt
 *.mdc

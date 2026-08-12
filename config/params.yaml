@@ -14,6 +14,6 @@
     num_height: 32
     num_range: 50
     r_solid_thres: 0.95
-    anchor_resolution: 2.0
+    anchor_resolution: 0.5
     voxel_size: 0.4
     blind: 2.0
