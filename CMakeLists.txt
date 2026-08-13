@@ -110,8 +110,9 @@ endif()
 
 
 add_executable(LTmapping src/long_term_mapping.cpp
-                  src/voxel_evidence.cpp
-                  include/solid/solid.cpp)
+                  src/session_context.cpp
+                  src/map_merge.cpp
+                  src/voxel_evidence.cpp)
 
 target_link_libraries(LTmapping
   ${PCL_LIBRARIES}

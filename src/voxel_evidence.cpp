@@ -6,14 +6,22 @@
 #include <limits>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include <Eigen/Eigenvalues>
 #include <omp.h>
+#include <pcl/common/transforms.h>
 #include <pcl/features/normal_3d_omp.h>
+#include <pcl/filters/filter.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/io/pcd_io.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
 #include <ufo/map/ufomap.hpp>
+
+#include "map_merge.hpp"
+#include "session_context.hpp"
 
 namespace lt_mapping {
 
@@ -258,9 +266,9 @@ void accumulateEvidence(const std::vector<FrameData>& frames,
     }
     const double elapsed_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_begin).count();
-    RCLCPP_INFO(rclcpp::get_logger("long_term_mapping"),
-                "Evidence accumulation: %zu frames, %zu interest voxels, dda_max_range=%.1f m, "
-                "elapsed=%.2f s",
+    RCLCPP_INFO(rclcpp::get_logger("LTmapping"),
+                "[200.240 EvidenceAccum] frames=%zu interest_voxels=%zu dda_max_range_m=%.1f "
+                "elapsed=%.2fs",
                 frames.size(), interest_set.size(), max_distance, elapsed_s);
 }
 
@@ -561,10 +569,15 @@ ClassificationResult classifyChanges(
 pcl::PointCloud<pcl::PointXYZI>::Ptr composeFinalMap(
     const pcl::PointCloud<pcl::PointXYZI>::Ptr& first_map,
     const pcl::PointCloud<pcl::PointXYZI>::Ptr& second_map, const ClassificationResult& cls,
-    const UfoVoidMap& map1, const UfoVoidMap& map2, const EvidenceParams& params, float leaf_size)
+    const UfoVoidMap& map1, const UfoVoidMap& map2, const EvidenceParams& params, float leaf_size,
+    ComposeDiagnostics& diag)
 {
     auto static_map(new pcl::PointCloud<pcl::PointXYZI>());
     static_map->reserve(first_map->points.size() + second_map->points.size());
+
+    // 점 단위가 아니라 복셀 단위로 세어야 cls.*_ue_voxels.size() 와 같은 축으로 비교된다.
+    std::unordered_set<int64_t> first_ue_dropped;
+    std::unordered_set<int64_t> second_ue_dropped;
 
     for (const auto& p : first_map->points) {
         int64_t key = voxelKey(p.x, p.y, p.z, params.res);
@@ -572,6 +585,9 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr composeFinalMap(
             continue;
         }
         if (map1.seenFree(ufo::Point(p.x, p.y, p.z))) {
+            if (cls.first_ue_voxels.find(key) != cls.first_ue_voxels.end()) {
+                first_ue_dropped.insert(key);
+            }
             continue;
         }
         static_map->points.push_back(p);
@@ -579,10 +595,17 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr composeFinalMap(
 
     for (const auto& p : second_map->points) {
         if (map2.seenFree(ufo::Point(p.x, p.y, p.z))) {
+            const int64_t key = voxelKey(p.x, p.y, p.z, params.res);
+            if (cls.second_ue_voxels.find(key) != cls.second_ue_voxels.end()) {
+                second_ue_dropped.insert(key);
+            }
             continue;
         }
         static_map->points.push_back(p);
     }
+
+    diag.first_ue_dropped_by_seen_free = first_ue_dropped.size();
+    diag.second_ue_dropped_by_seen_free = second_ue_dropped.size();
 
     pcl::VoxelGrid<pcl::PointXYZI> down_size_filter;
     down_size_filter.setLeafSize(leaf_size, leaf_size, leaf_size);
@@ -619,12 +642,26 @@ MapUpdateResult detectAndCompose(const pcl::PointCloud<pcl::PointXYZI>::Ptr& fir
                               session1.impl().map, session2.impl().map, ev_1in2, ev_2in1, params);
 
     out.static_map = composeFinalMap(first_full, second_full, out.cls, session1.impl().map,
-                                     session2.impl().map, params, leaf_size);
+                                     session2.impl().map, params, leaf_size, out.compose_diag);
 
-    RCLCPP_INFO(rclcpp::get_logger("long_term_mapping"),
-                "Map update: ND/PD(nonground)=%zu/%zu UE(full)=%zu/%zu | static=%zu",
+    RCLCPP_INFO(rclcpp::get_logger("LTmapping"),
+                "[200.270 ChangeDetect] nd_nonground=%zu pd_nonground=%zu ue1_full=%zu ue2_full=%zu "
+                "static=%zu",
                 out.cls.nd_voxels.size(), out.cls.pd_voxels.size(), out.cls.first_ue_voxels.size(),
                 out.cls.second_ue_voxels.size(), out.static_map->size());
+
+    const auto dropRatio = [](size_t dropped, size_t total) -> double {
+        return total == 0 ? 0.0 : static_cast<double>(dropped) / static_cast<double>(total);
+    };
+    RCLCPP_INFO(rclcpp::get_logger("LTmapping"),
+                "[400.440 ComposeFinal] ue1_total=%zu ue1_dropped_seenfree=%zu ue1_drop_ratio=%.4f "
+                "ue2_total=%zu ue2_dropped_seenfree=%zu ue2_drop_ratio=%.4f",
+                out.cls.first_ue_voxels.size(), out.compose_diag.first_ue_dropped_by_seen_free,
+                dropRatio(out.compose_diag.first_ue_dropped_by_seen_free,
+                          out.cls.first_ue_voxels.size()),
+                out.cls.second_ue_voxels.size(), out.compose_diag.second_ue_dropped_by_seen_free,
+                dropRatio(out.compose_diag.second_ue_dropped_by_seen_free,
+                          out.cls.second_ue_voxels.size()));
 
     return out;
 }
@@ -675,10 +712,100 @@ SessionMaps buildVoidMap(int session_id, int map_size, const EvidenceParams& par
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
-    RCLCPP_INFO(rclcpp::get_logger("long_term_mapping"),
-                "Session %d void map insertion finished in %.3f sec (%d keyframes)", session_id,
-                static_cast<double>(ms) / 1000.0, map_size);
+    RCLCPP_INFO(rclcpp::get_logger("LTmapping"),
+                "[200.230 VoidMap] session=%d keyframes=%d elapsed=%.3fs", session_id,
+                map_size, static_cast<double>(ms) / 1000.0);
     return session_map;
 }
 
 }  // namespace lt_mapping
+
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr PubMerge_map;
+
+void initMergeMapPublisher(const std::shared_ptr<rclcpp::Node>& nh, const rclcpp::QoS& qos_viz)
+{
+    PubMerge_map = nh->create_publisher<sensor_msgs::msg::PointCloud2>("/Merge_map", qos_viz);
+}
+
+void resetMergeMapPublisher()
+{
+    PubMerge_map.reset();
+}
+
+void MapUpdate()
+{
+    // full map: StaticMap compose / self-void 제거용
+    pcl::PointCloud<pcl::PointXYZI>::Ptr first_full(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::PointCloud<pcl::PointXYZI>::Ptr second_full(new pcl::PointCloud<pcl::PointXYZI>());
+    // nonground: PD/ND/UE 판정용 (지면 오검출 억제)
+    pcl::PointCloud<pcl::PointXYZI>::Ptr first_nonground(new pcl::PointCloud<pcl::PointXYZI>());
+    pcl::PointCloud<pcl::PointXYZI>::Ptr second_nonground(new pcl::PointCloud<pcl::PointXYZI>());
+
+    pcl::io::loadPCDFile(save_directory + "FirstMap.pcd", *first_full);
+    pcl::io::loadPCDFile(save_directory + "SecondMap.pcd", *second_full);
+    pcl::io::loadPCDFile(save_directory + "FirstNonGroundMap.pcd", *first_nonground);
+    pcl::io::loadPCDFile(save_directory + "SecondNonGroundMap.pcd", *second_nonground);
+
+    std::vector<int> idx;
+    pcl::removeNaNFromPointCloud(*first_full, *first_full, idx);
+    pcl::removeNaNFromPointCloud(*second_full, *second_full, idx);
+    pcl::removeNaNFromPointCloud(*first_nonground, *first_nonground, idx);
+    pcl::removeNaNFromPointCloud(*second_nonground, *second_nonground, idx);
+
+    auto make_loader = [](int session_id) {
+        return [session_id](int local_idx, Eigen::Vector3f& origin) {
+            Pose6 key_pose;
+            // session_id가 1이든 2이든 getGlobalPose() 하나로 앵커 합성까지 포함해 처리한다
+            // (세션1 앵커는 항등원이므로 결과는 기존과 동일).
+            gtsam::Pose3 global_pose = getGlobalPose(session_id, local_idx);
+            key_pose.x = global_pose.translation().x();
+            key_pose.y = global_pose.translation().y();
+            key_pose.z = global_pose.translation().z();
+            key_pose.roll = global_pose.rotation().roll();
+            key_pose.pitch = global_pose.rotation().pitch();
+            key_pose.yaw = global_pose.rotation().yaw();
+
+            Eigen::Matrix4f tf = createTransformMatrix(key_pose);
+            origin = Eigen::Vector3f(tf(0, 3), tf(1, 3), tf(2, 3));
+
+            const std::string scans_dir = (session_id == 1 ? sessions[0].scans_path : sessions[1].scans_path);
+            auto cloud = loadRawScanPointCloud(scans_dir, local_idx);
+            if (!cloud) {
+                return pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>());
+            }
+            std::vector<int> nan_idx;
+            pcl::removeNaNFromPointCloud(*cloud, *cloud, nan_idx);
+            pcl::transformPointCloud(*cloud, *cloud, tf);
+            return cloud;
+        };
+    };
+
+    auto session1 = lt_mapping::buildVoidMap(1, sessions[0].size, persistence_params,
+                                             static_cast<float>(MAX_DISTANCE), make_loader(1));
+    auto session2 = lt_mapping::buildVoidMap(2, sessions[1].size, persistence_params,
+                                             static_cast<float>(MAX_DISTANCE), make_loader(2));
+
+    auto result = lt_mapping::detectAndCompose(
+        first_nonground, second_nonground, first_full, second_full, session1, session2,
+        persistence_params, static_cast<float>(blind), static_cast<float>(MAX_DISTANCE),
+        static_cast<float>(VOXEL_SIZE));
+
+    if (!result.cls.first_ue->empty()) {
+        pcl::io::savePCDFileBinary(DebugDirectory + "FirstUE.pcd", *result.cls.first_ue);
+    }
+    if (!result.cls.second_ue->empty()) {
+        pcl::io::savePCDFileBinary(DebugDirectory + "SecondUE.pcd", *result.cls.second_ue);
+    }
+    if (!result.cls.nd_cloud->empty()) {
+        pcl::io::savePCDFileBinary(DebugDirectory + "ND.pcd", *result.cls.nd_cloud);
+    }
+    if (!result.cls.pd_cloud->empty()) {
+        pcl::io::savePCDFileBinary(DebugDirectory + "PD.pcd", *result.cls.pd_cloud);
+    }
+
+    sensor_msgs::msg::PointCloud2 map_msg;
+    pcl::toROSMsg(*result.static_map, map_msg);
+    map_msg.header.frame_id = "map";
+    PubMerge_map->publish(map_msg);
+    pcl::io::savePCDFileBinary(save_directory + "StaticMap.pcd", *result.static_map);
+}

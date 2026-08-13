@@ -11,6 +11,8 @@
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 namespace lt_mapping {
 
@@ -105,9 +107,17 @@ struct ClassificationResult {
     std::unordered_set<int64_t> pd_voxels;
 };
 
+// 계측 전용. composeFinalMap() 의 seenFree 필터가 UE 집합과 교집합을 가지는지 확인하기 위한
+// 값이며 판정·합성 어디에도 입력되지 않는다.
+struct ComposeDiagnostics {
+    size_t first_ue_dropped_by_seen_free = 0;
+    size_t second_ue_dropped_by_seen_free = 0;
+};
+
 struct MapUpdateResult {
     ClassificationResult cls;
     pcl::PointCloud<pcl::PointXYZI>::Ptr static_map{new pcl::PointCloud<pcl::PointXYZI>()};
+    ComposeDiagnostics compose_diag;
 };
 
 inline float clampLogOdds(float l, float lim)
@@ -152,3 +162,12 @@ MapUpdateResult detectAndCompose(const pcl::PointCloud<pcl::PointXYZI>::Ptr& fir
                                  float leaf_size);
 
 }  // namespace lt_mapping
+
+// 모듈 D — 지도 변화 감지·지속성 판정. 01.developerules.mdc 「코드 구조 규칙 (모듈 경계)」 D 항목.
+// PubMerge_map(V 그룹 예외) 소유.
+extern rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr PubMerge_map;
+
+void initMergeMapPublisher(const std::shared_ptr<rclcpp::Node>& nh, const rclcpp::QoS& qos_viz);
+void resetMergeMapPublisher();
+
+void MapUpdate();
